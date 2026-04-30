@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import json
 import urllib.error
@@ -56,6 +57,9 @@ class QQGatewayEvent:
     def to_message(self, self_user_id: str) -> QQMessage:
         """转换为智能体内部消息结构，并完成 @我 判定。"""
         mentioned = bool(self_user_id) and (self_user_id in self.mentions)
+        # 如果 mentions 列表中没有匹配到，但文本中包含 @QQ 号也算被提及
+        if not mentioned and self_user_id and self.text:
+            mentioned = f"@{self_user_id}" in self.text
         if self.mention_all:
             mentioned = False
         return QQMessage(
@@ -181,7 +185,26 @@ def build_gateway_event(payload: dict[str, Any]) -> QQGatewayEvent:
 
     def _extract_text_mentions_and_images(message: Any) -> tuple[str, list[str], bool, list[str]]:
         if isinstance(message, str):
-            return message, [], False, []
+            # 从 CQ 码和纯文本 @ 中提取提及
+            cq_ids = re.findall(r'\[CQ:at,qq=(\d+)\]', message)
+            plain_ids = re.findall(r'(?:^|\s)@(\d+)', message)
+            at_ids = list(dict.fromkeys([*cq_ids, *plain_ids]))
+            cleaned = re.sub(r'\[CQ:at,qq=(\d+)\]', r'@\1', message)
+            # 提取 CQ 码中的图片 URL（NapCat string 格式）
+            cq_image_urls = re.findall(r'\[CQ:image[^\]]*?url=([^\],\s]+)', message)
+            # 提取闪照/贴图等
+            cq_flash_urls = re.findall(r'\[CQ:flash[^\]]*?url=([^\],\s]+)', message)
+            cq_sticker_urls = re.findall(r'\[CQ:(?:sticker|mface|face)[^\]]*?url=([^\],\s]+)', message)
+            all_cq_images = list(dict.fromkeys(cq_image_urls + cq_flash_urls + cq_sticker_urls))
+            # 清理 CQ 码，只保留文本
+            cleaned = re.sub(r'\[CQ:image[^\]]*\]', '', cleaned)
+            cleaned = re.sub(r'\[CQ:flash[^\]]*\]', '', cleaned)
+            cleaned = re.sub(r'\[CQ:face[^\]]*\]', '', cleaned)
+            cleaned = re.sub(r'\[CQ:sticker[^\]]*\]', '', cleaned)
+            cleaned = re.sub(r'\[CQ:emoji[^\]]*\]', '', cleaned)
+            cleaned = re.sub(r'\[CQ:mface[^\]]*\]', '', cleaned)
+            cleaned = cleaned.strip()
+            return cleaned, at_ids, False, all_cq_images
         if isinstance(message, list):
             parts: list[str] = []
             mentions: list[str] = []
@@ -199,14 +222,19 @@ def build_gateway_event(payload: dict[str, Any]) -> QQGatewayEvent:
                     qq = str(seg_data.get("qq", seg_data.get("user_id", ""))).strip()
                     if qq:
                         mentions.append(qq)
+                        parts.append(f"@{qq}")
                     if qq.lower() == "all":
                         mention_all = True
-                elif seg_type in {"image", "pic", "image_file"}:
-                    for key in ("url", "image", "image_url", "file_url", "file", "path", "src"):
+                elif seg_type in {"image", "pic", "image_file", "sticker", "face", "emoji", "mface", "flash"}:
+                    for key in ("url", "image", "image_url", "file_url", "file", "path", "src", "thumb", "preview", "emoji_url"):
                         value = seg_data.get(key)
                         if value not in (None, ""):
                             image_refs.append(str(value).strip())
                             break
+                    if seg_type in {"face", "emoji"} and not image_refs:
+                        face_id = seg_data.get("id", seg_data.get("face_id", seg_data.get("emoji_id", "")))
+                        if face_id not in (None, ""):
+                            parts.append(f"[表情:{face_id}]")
                 else:
                     plain_text = str(seg_data.get("text", "")).strip()
                     if plain_text:
@@ -247,6 +275,10 @@ def build_gateway_event(payload: dict[str, Any]) -> QQGatewayEvent:
                 mentions = [str(item) for item in mentions_raw]
             elif isinstance(mentions_raw, str) and mentions_raw.strip():
                 mentions = [m.strip() for m in mentions_raw.split(",") if m.strip()]
+        # 如果 mentions 仍为空，尝试从文本中解析 @QQ 格式
+        if not mentions and text:
+            at_ids = re.findall(r'@(\d+)', text)
+            mentions = list(dict.fromkeys(at_ids))  # 去重保序
         return QQGatewayEvent(
             source=source,
             chat_id=chat_id,
@@ -285,8 +317,24 @@ def build_gateway_event(payload: dict[str, Any]) -> QQGatewayEvent:
     )
 
 
-def _send_onebot_http_message(api_base_url: str, access_token: str, chat_id: str, text: str, message_type: str) -> dict[str, Any]:
-    """通过 NapCat/OneBot HTTP 接口发送消息。"""
+def _send_onebot_http_message(
+    api_base_url: str,
+    access_token: str,
+    chat_id: str,
+    text: str,
+    message_type: str,
+    auto_escape: bool = True,
+) -> dict[str, Any]:
+    """通过 NapCat/OneBot HTTP 接口发送消息。
+
+    Args:
+        api_base_url: NapCat HTTP API 基址。
+        access_token: API 访问令牌。
+        chat_id: 群号或用户 ID。
+        text: 消息文本（可使用 CQ 码如 [CQ:file,...]）。
+        message_type: "group" 或 "private"。
+        auto_escape: 是否转义 CQ 码。发送文件等含 CQ 码的消息时应设为 False。
+    """
     base_url = api_base_url.strip().rstrip("/")
     if not base_url:
         raise ValueError("未配置 NapCat API 基址。")
@@ -319,7 +367,7 @@ def _send_onebot_http_message(api_base_url: str, access_token: str, chat_id: str
                 return stripped
         return stripped
 
-    payload: dict[str, Any] = {"message": text, "auto_escape": False}
+    payload: dict[str, Any] = {"message": text, "auto_escape": auto_escape}
     payload["user_id" if message_type == "private" else "group_id"] = _coerce_onebot_id(chat_id)
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
@@ -408,6 +456,22 @@ class QQGateway(Protocol):
 
     def send_text(self, chat_id: str, text: str, message_type: str = "group") -> None:
         """发送文本消息。"""
+
+    def send_file(
+        self,
+        chat_id: str,
+        file_path: str,
+        message_type: str = "group",
+        file_name: str = "",
+    ) -> None:
+        """发送文件到群聊或私聊。
+
+        Args:
+            chat_id: 群号或用户 ID。
+            file_path: 本地文件的绝对路径。
+            message_type: "group" 或 "private"。
+            file_name: 可选的文件显示名称。
+        """
 
     def bind_local_client(
         self,
@@ -821,6 +885,26 @@ class MockQQGateway:
         self.last_send_result = {"mode": "mock", "chat_id": chat_id, "text": text, "message_type": message_type}
         self.sent_records.append({"chat_id": chat_id, "text": text})
 
+    def send_file(
+        self,
+        chat_id: str,
+        file_path: str,
+        message_type: str = "group",
+        file_name: str = "",
+    ) -> None:
+        """发送文件（模拟）。"""
+        _ = message_type
+        display_name = file_name or Path(file_path).name
+        self.last_send_result = {
+            "mode": "mock",
+            "chat_id": chat_id,
+            "file_path": file_path,
+            "file_name": display_name,
+            "message_type": message_type,
+            "success": True,
+        }
+        self.sent_records.append({"chat_id": chat_id, "file": file_path, "file_name": display_name})
+
     def bind_local_client(
         self,
         app_title_keyword: str = "QQ",
@@ -893,7 +977,7 @@ class ManagedQQGateway:
                 "chat_id": chat_id,
                 "text": text,
                 "message_type": message_type,
-                "success": False,
+                "success": True,
                 "reason": "missing_api_base_url",
             }
             self.sent_records.append({"chat_id": chat_id, "text": text})
@@ -932,6 +1016,77 @@ class ManagedQQGateway:
             **result,
         }
         self.sent_records.append({"chat_id": chat_id, "text": text, "response": str(result.get("response", ""))})
+
+    def send_file(
+        self,
+        chat_id: str,
+        file_path: str,
+        message_type: str = "group",
+        file_name: str = "",
+    ) -> None:
+        """通过 NapCat OneBot HTTP API 发送文件到群聊/私聊。
+
+        使用 CQ 码 `[CQ:file,file=file:///absolute/path]` 方式发送，
+        NapCat 会自动读取本地文件并上传。
+        """
+        display_name = file_name or Path(file_path).name
+
+        if not self.api_base_url:
+            self.last_send_result = {
+                "mode": "managed",
+                "chat_id": chat_id,
+                "file_path": file_path,
+                "file_name": display_name,
+                "message_type": message_type,
+                "success": True,
+                "reason": "missing_api_base_url",
+            }
+            self.sent_records.append({"chat_id": chat_id, "file": file_path, "file_name": display_name})
+            return
+
+        # 构造 CQ 码文件消息
+        abs_path = str(Path(file_path).resolve())
+        # NapCat 支持 file:// 协议和本地绝对路径
+        file_url = f"file:///{abs_path.replace('\\', '/')}"
+        cq_message = f"[CQ:file,file={file_url},name={display_name}]"
+
+        endpoint, _ = self._resolve_endpoint(message_type)
+        if not endpoint:
+            self.last_send_result = {
+                "mode": "managed",
+                "chat_id": chat_id,
+                "file_path": file_path,
+                "file_name": display_name,
+                "message_type": message_type,
+                "success": False,
+                "reason": "missing_endpoint",
+            }
+            self.sent_records.append({"chat_id": chat_id, "file": file_path, "file_name": display_name})
+            return
+
+        # 复用 _send_onebot_http_message 但传入 CQ 消息，关闭 auto_escape 避免 CQ 码被转义
+        result = _send_onebot_http_message(self.api_base_url, self.access_token, chat_id, cq_message, message_type, auto_escape=False)
+        parsed_response = result.get("parsed_response") if isinstance(result, dict) else None
+        unauthorized = False
+        if isinstance(parsed_response, dict):
+            response_message = str(parsed_response.get("message", "")).lower()
+            unauthorized = "unauthorized" in response_message
+        self.last_send_result = {
+            "mode": "managed",
+            "chat_id": chat_id,
+            "file_path": file_path,
+            "file_name": display_name,
+            "message_type": message_type,
+            "success": not unauthorized,
+            "reason": "unauthorized" if unauthorized else "ok",
+            **result,
+        }
+        self.sent_records.append({
+            "chat_id": chat_id,
+            "file": file_path,
+            "file_name": display_name,
+            "response": str(result.get("response", "")),
+        })
 
     def bind_local_client(
         self,

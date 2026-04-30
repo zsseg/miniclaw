@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 
-ModelProvider = Literal["mock", "openai", "deepseek"]
+ModelProvider = Literal["mock", "openai", "deepseek", "qwen"]
 
 
 @dataclass(slots=True)
@@ -39,7 +39,19 @@ class AgentConfig:
     quiet_mode: bool = False
     show_react_steps: bool = True
     enable_stream_output: bool = True
+    enable_search: bool = False
+    """启用联网搜索（DeepSeek/Qwen 支持）。"""
+
     tool_plugins_config: Path | None = field(default_factory=lambda: Path.cwd() / "workspace" / "tools_plugins.json")
+
+    def __post_init__(self) -> None:
+        """确保 Path 类型字段始终为 Path 对象。"""
+        if isinstance(self.workspace_dir, str):
+            self.workspace_dir = Path(self.workspace_dir)
+        if isinstance(self.history_path, str):
+            self.history_path = Path(self.history_path)
+        if isinstance(self.tool_plugins_config, str):
+            self.tool_plugins_config = Path(self.tool_plugins_config)
 
     def ensure_workspace(self) -> None:
         """确保工作目录与历史文件父目录存在。"""

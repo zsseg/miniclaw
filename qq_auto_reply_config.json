@@ -1,0 +1,35 @@
+{
+  "enabled": true,
+  "private_enabled": true,
+  "paused": false,
+  "target_group_id": "1058712846",
+  "target_group_ids": [
+    "1058712846"
+  ],
+  "private_delay_sec": 0,
+  "custom_prompt": "",
+  "cooldown_sec": 0,
+  "self_user_id": "self_user",
+  "reply_api_provider": "mock",
+  "reply_api_model": "",
+  "reply_api_key": "",
+  "reply_api_base_url": "",
+  "managed_account": "3892874358",
+  "managed_api_base_url": "http://127.0.0.1:3000/plugin/napcat-plugin-builtin/api",
+  "managed_access_token": "Kunkz.b6zmA4_mmI",
+  "receive_token": "7uJzPx6q3fdG_.1V",
+  "gateway_mode": "managed",
+  "app_title_keyword": "QQ",
+  "process_name": "",
+  "executable_path": "",
+  "window_title": "",
+  "client_binding": {
+    "app_title_keyword": "managed:3892874358",
+    "process_name": "",
+    "executable_path": "",
+    "window_title": "",
+    "connected": true,
+    "bound_at": "2026-04-30T00:21:52",
+    "notes": "托管账号模式已启用，不依赖本地 QQ 窗口。"
+  }
+}

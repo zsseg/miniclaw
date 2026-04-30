@@ -83,13 +83,18 @@ class ToolRegistry:
         """返回所有工具 schema。"""
         return [tool.schema() for tool in self._tools.values()]
 
-    def execute(self, call: ToolCall) -> ToolResult:
-        """执行工具调用，统一捕获异常。"""
+    def execute(self, call: ToolCall, progress_callback: Callable[[str], None] | None = None) -> ToolResult:
+        """执行工具调用，统一捕获异常。
+
+        Args:
+            call: 工具调用信息
+            progress_callback: 可选的进度回调，透传给工具用于长耗时操作给出中间反馈
+        """
         tool = self._tools.get(call.name)
         if tool is None:
             return ToolResult(success=False, output=f"工具不存在：{call.name}")
 
         try:
-            return tool.run(call.arguments)
+            return tool.run(call.arguments, progress_callback=progress_callback)
         except Exception as exc:  # noqa: BLE001
             return ToolResult(success=False, output=f"工具执行异常：{exc}")

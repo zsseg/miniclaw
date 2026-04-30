@@ -14,6 +14,7 @@ import urllib.request
 from clawmini.core.security import ensure_allowed_extension, ensure_path_in_workspace
 from clawmini.tools.base import BaseTool
 from clawmini.types import ToolResult
+from typing import Callable
 
 
 class WritingTool(BaseTool):
@@ -55,8 +56,11 @@ class WritingTool(BaseTool):
         self.task_sessions: dict[str, dict[str, Any]] = {}
         self.active_task_id: str | None = None
 
-    def run(self, arguments: dict[str, Any]) -> ToolResult:
+    def run(self, arguments: dict[str, Any], progress_callback: Callable[[str], None] | None = None) -> ToolResult:
         command = str(arguments.get("command", ""))
+        # 兼容别名
+        if command in ("generate", "write"):
+            command = "create"
         if command == "create":
             return self._create(arguments)
         if command == "switch_task":
@@ -108,7 +112,8 @@ class WritingTool(BaseTool):
             path = path.with_stem(path.stem + "_v2")
 
         is_markdown = path.suffix.lower() == ".md"
-        if api_provider in {"openai", "deepseek"} and api_key:
+        api_fallback = False
+        if api_provider in {"openai", "deepseek", "qwen"} and api_key:
             content = self._generate_article_via_api(
                 topic=topic,
                 style=style,
@@ -120,6 +125,7 @@ class WritingTool(BaseTool):
                 base_url=api_base_url,
                 allow_markdown=is_markdown,
             )
+            api_fallback = "外部 API 调用失败" in content
         else:
             content = self._generate_article(topic=topic, style=style, word_count=word_count, custom_prompt=custom_prompt, allow_markdown=is_markdown)
         content = self._sanitize_generated_content(content, allow_risky=allow_risky_content)
@@ -138,9 +144,14 @@ class WritingTool(BaseTool):
         )
         summary = self._summarize_text(content)
         stats_word_count = self._estimate_word_count(content)
+        status_note = ""
+        if api_fallback:
+            status_note = "（外部API调用失败，已回退本地生成）"
+        elif api_provider in {"openai", "deepseek", "qwen"} and api_key:
+            status_note = "（已调用外部API）"
         return ToolResult(
             True,
-            f"文稿已生成：{path}（字数约 {stats_word_count}）",
+            f"文稿已生成：{path}（字数约 {stats_word_count}）{status_note}",
             {
                 "file_path": str(path),
                 "task_id": task_id,
@@ -489,9 +500,22 @@ class WritingTool(BaseTool):
         """调用外部 API 生成文稿正文。"""
         resolved_base = base_url.strip()
         if not resolved_base:
-            resolved_base = "https://api.openai.com/v1" if provider == "openai" else "https://api.deepseek.com/v1"
+            if provider == "openai":
+                resolved_base = "https://api.openai.com/v1"
+            elif provider == "qwen":
+                resolved_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            else:
+                resolved_base = "https://api.deepseek.com/v1"
+        elif not resolved_base.rstrip("/").endswith("/v1"):
+            resolved_base = resolved_base.rstrip("/") + "/v1"
         endpoint = resolved_base.rstrip("/") + "/chat/completions"
-        resolved_model = model or ("gpt-4o-mini" if provider == "openai" else "deepseek-chat")
+        resolved_model = model or (
+            "gpt-4o-mini"
+            if provider == "openai"
+            else "qwen-plus"
+            if provider == "qwen"
+            else "deepseek-chat"
+        )
 
         prompt = self._build_generation_prompt(
             topic=topic,

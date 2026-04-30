@@ -47,3 +47,42 @@
 
 - `qq_auto_reply:set_gateway`
    - `mode`: `mock` / `windows`
+
+## qq_auto_reply 详细说明
+
+`qq_auto_reply.py` 提供 QQ 消息自动填充与自动回复能力，常见用例：
+
+- 群聊 @ 某人 时由 AI 生成回复并通过一键填充发送；
+- 私聊超时自动回复；
+- 基于规则或模型生成模板并批量发送。
+
+运行模式：
+
+- `mock`：仅生成内容并写入日志，不与真实客户端交互（便于调试）；
+- `windows`：尝试使用 Windows 自动化或 NapCat 将文本填入目标窗口并触发发送；
+- `managed`：保留给将来扩展的托管网关（例如企业 QQ API）。
+
+关键函数与参数：
+
+- `set_gateway(mode='mock'|'windows'|'managed')`：切换发送网关；
+- `handle_incoming_message(qq_message)`：处理收到的消息并根据策略决定是否回复；
+- `auto_fill_and_send(text, target_window_info)`：在 `windows` 模式下执行填充与发送操作。
+
+故障排查步骤：
+
+1. 日志优先：查看 `workspace/qq_auto_reply.log`，里面会记录网关初始化、回退和错误堆栈；
+2. 模式验证：在设置界面或命令行运行 `qq_auto_reply:set_gateway mode=mock` 以确认消息生成逻辑正确；
+3. NapCat/自动化：若使用 `windows` 模式，确认 NapCat 或相应自动化工具已经安装并有权限访问目标窗口；
+4. 权限问题：在 Windows 上自动化可能需管理员权限，尝试以管理员身份运行程序进行验证；
+5. 回退机制：若 `windows` 网关初始化失败，工具会自动回退到 `mock` 模式并写入日志，检查回退原因并修复依赖或权限问题；
+
+调试建议：
+
+- 在 `mock` 模式下记录 `auto_fill_and_send` 的 `text` 与 `target_window_info`，用于本地复现；
+- 在 `windows` 模式下，可先手动打开目标聊天窗口并确保窗口可见，再触发自动填充；
+- 如需自动化脚本级别排查，建议编写小脚本调用 `qq_auto_reply.auto_fill_and_send()` 并打印返回值与异常堆栈。
+
+安全与隐私：
+
+- 自动发送功能需谨慎开启，建议在企业或测试账户下先行验证；
+- 工具在发送前会对敏感信息进行基本过滤与脱敏（可配置）。

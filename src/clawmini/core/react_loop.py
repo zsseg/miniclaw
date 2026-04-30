@@ -44,7 +44,7 @@ class ReactLoop:
             memory.add("assistant", f"Thought: {step.thought}")
             emit(f"Round {round_idx} Thought: {step.thought}")
 
-            if step.final_answer:
+            if step.final_answer and step.action is None:
                 memory.add("assistant", step.final_answer)
                 emit(f"Round {round_idx} Final: {step.final_answer}")
                 return ReactRunResult(final_answer=step.final_answer, rounds=round_idx, traces=traces)
@@ -60,10 +60,24 @@ class ReactLoop:
                 f"{round_idx} Action: {step.action.name}({step.action.arguments})"
             )
 
-            result = self.tool_registry.execute(step.action)
+            # 将 event_callback 透传给工具，支持长耗时任务（如图片生成）发送进度反馈
+            result = self.tool_registry.execute(step.action, progress_callback=emit)
             observation = f"Observation(success={result.success}): {result.output}"
             memory.add("tool", observation)
             emit(f"Round {round_idx} {observation}")
+
+            # 工具执行失败时立即返回，避免用户看到长时间空转或无反馈
+            if not result.success:
+                fail_msg = f"❌ 工具执行失败：{result.output}"
+                memory.add("assistant", fail_msg)
+                emit(f"Round {round_idx} Final: {fail_msg}")
+                return ReactRunResult(final_answer=fail_msg, rounds=round_idx, traces=traces)
+
+            if step.action.name == "image_generation":
+                final_msg = result.output or "✅ 图片已生成。"
+                memory.add("assistant", final_msg)
+                emit(f"Round {round_idx} Final: {final_msg}")
+                return ReactRunResult(final_answer=final_msg, rounds=round_idx, traces=traces)
 
         stop_msg = f"已达到最大轮数 {self.max_rounds}，请拆分任务后重试。"
         memory.add("assistant", stop_msg)

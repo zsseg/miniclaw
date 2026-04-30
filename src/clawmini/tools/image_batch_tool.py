@@ -7,7 +7,7 @@ import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image  # type: ignore[import-not-found]
 
@@ -47,7 +47,7 @@ class ImageBatchTool(BaseTool):
         self.canceled_tasks: set[str] = set()
         self.task_state: dict[str, dict[str, Any]] = {}
 
-    def run(self, arguments: dict[str, Any]) -> ToolResult:
+    def run(self, arguments: dict[str, Any], progress_callback: Callable[[str], None] | None = None) -> ToolResult:
         command = str(arguments.get("command", "process"))
         if command == "cancel_task":
             task_id = str(arguments.get("task_id", ""))

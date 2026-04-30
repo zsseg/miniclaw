@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from clawmini.core.security import ensure_path_in_workspace
 from clawmini.tools.base import BaseTool
@@ -43,7 +43,7 @@ class ShellCommandTool(BaseTool):
     MAX_ARGS = 12
     MAX_ARG_LENGTH = 200
 
-    def run(self, arguments: dict[str, Any]) -> ToolResult:
+    def run(self, arguments: dict[str, Any], progress_callback: Callable[[str], None] | None = None) -> ToolResult:
         command = str(arguments.get("command", "")).strip().lower()
         args = arguments.get("args", [])
         timeout_sec = int(arguments.get("timeout_sec", 10))
