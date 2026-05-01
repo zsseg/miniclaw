@@ -13,6 +13,7 @@ from typing import Any, Callable
 import re
 import webbrowser
 import urllib.request
+import urllib.error
 
 from clawmini.adapters.qq_adapter import (
     ManagedQQGateway,
@@ -359,99 +360,200 @@ class QQAutoReplyTool(BaseTool):
         return descriptions
 
     def _build_user_content(self, text: str, context_info: dict[str, Any]) -> str | list[dict[str, Any]]:
+        """构造发给回复模型的用户内容。
+
+        DeepSeek：永远只返回纯文本。
+        Qwen/OpenAI vision：可以返回 content list。
+        """
         image_refs: list[str] = []
         seen_refs: set[str] = set()
+
         for item in context_info.get("image_refs", []):
             ref = str(item).strip()
             if not ref or ref in seen_refs:
                 continue
             seen_refs.add(ref)
             image_refs.append(ref)
+
+        def _clean_user_text_for_image(raw: str) -> str:
+            cleaned = str(raw or "")
+            cleaned = re.sub(r"\[CQ:image[^\]]*\]", "", cleaned)
+            cleaned = re.sub(r"\[CQ:at[^\]]*\]", "", cleaned)
+            cleaned = cleaned.replace("[图片]", "").replace("图片消息", "")
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            return cleaned
+
         if self.enable_image_recognition and image_refs:
-            # 在文本中标注图片类型信息，辅助 VL 模型理解
-                        # DeepSeek V4 不直接吃图片；先用 Qwen-VL 识图，再把图片描述作为文本交给 DeepSeek
-            if self.reply_api_provider.strip().lower() == "deepseek":
-                descriptions = self._describe_images_with_qwen_vl(image_refs, text)
+            provider = self.reply_api_provider.strip().lower()
+            base_text = _clean_user_text_for_image(text)
 
-                if descriptions:
-                    image_block = "\n".join(f"- {item}" for item in descriptions)
-                    base_text = text.strip() or "用户发送了图片。"
-                    return (
-                        f"{base_text}\n\n"
-                        f"【图片内容解析，来自 Qwen-VL】\n"
-                        f"{image_block}\n\n"
-                        f"请基于上面的图片内容，用自然 QQ 聊天语气回复。"
-                    )
+            if provider == "deepseek":
+                descriptions = self._describe_images_with_qwen_vl(image_refs, base_text)
+                clean_descriptions: list[str] = []
+                forbidden_bits = [
+                    "请识别这张 QQ 聊天图片",
+                    "如果是表情包/梗图",
+                    "如果是截图",
+                    "如果是普通图片",
+                    "用中文回答，直接描述图片内容，不要客套",
+                    "用户配文：",
+                    "请基于上面的图片内容",
+                    "请自然说明你暂时没看清图片",
+                    "【图片内容解析",
+                    "〖图片内容解析",
+                    "【图片提示】",
+                    "〖图片提示〗",
+                    "来自 Qwen-VL",
+                ]
 
-                base_text = text.strip() or "用户发送了图片。"
-                return (
-                    f"{base_text}\n\n"
-                    f"【图片提示】用户发送了图片，但 Qwen-VL 未能识别。"
-                    f"请自然说明你暂时没看清图片，或者让对方补充说明。"
-                )
+                for item in descriptions:
+                    desc = str(item or "").strip()
+                    if not desc:
+                        continue
+                    if "识别失败" in desc:
+                        continue
+                    if any(bit in desc for bit in forbidden_bits):
+                        continue
+                    clean_descriptions.append(desc)
+
+                if clean_descriptions:
+                    image_block = "\n".join(f"- {item}" for item in clean_descriptions)
+                    if base_text:
+                        return f"{base_text}\n\n图片内容：\n{image_block}"
+                    return f"用户发送了图片。\n\n图片内容：\n{image_block}"
+
+                if base_text:
+                    return f"{base_text}\n\n图片内容：暂时无法识别清楚。"
+                return "用户发送了一张图片，但图片内容暂时无法识别清楚。"
+
             image_hints: list[str] = []
             for ref in image_refs:
                 img_type = self._classify_image_type(ref)
                 image_hints.append(f"[附带的{img_type}]")
-            annotated_text = text
+
+            annotated_text = base_text or "用户发送了图片。"
             if image_hints:
-                annotated_text = text + "\n\n" + "用户同时也发送了以下内容：" + "；".join(image_hints)
+                annotated_text = annotated_text + "\n\n图片附件：" + "；".join(image_hints)
+
             content: list[dict[str, Any]] = [{"type": "text", "text": annotated_text}]
             for ref in image_refs:
                 image_part = self._image_ref_to_content_part(ref)
                 if image_part is not None:
                     content.append(image_part)
+
             if len(content) > 1:
                 return content
+
+            return annotated_text
+
         return text
 
 
     def _sanitize_reply_before_send(self, reply: str) -> str:
-        """????????????????/??????? QQ?"""
+        """发送前最终防线：禁止把人设 prompt、识图 prompt、CQ 原文发到 QQ。"""
         text = str(reply or "").strip()
         if not text:
-            return text
+            return ""
 
         custom_prompt = str(getattr(self, "custom_prompt", "") or "").strip()
 
-        leak_hits = 0
-        leak_keywords = [
-            "??????",
-            "????",
+        def _safe_fallback() -> str:
+            return "刚才接口有点抽风，猫猫先不乱说喵。"
+
+        # 自定义人设整段泄漏，典型形式：[你现在的人设是...]
+        if custom_prompt and len(custom_prompt) >= 20:
+            if custom_prompt[:20] in text or f"[{custom_prompt[:20]}" in text:
+                return _safe_fallback()
+
+        prompt_keywords = [
+            "你现在的人设",
+            "系统提示",
             "system prompt",
-            "### ??",
-            "### ????",
-            "### ?????",
-            "???? Markdown",
-            "??????",
-            "??????????",
-            "?????",
+            "### 人设",
+            "### 回复风格",
+            "### 当前上下文",
+            "不要输出 Markdown",
+            "不要逐条回复",
+            "你的任务不是逐条回复",
+            "请识别这张 QQ 聊天图片",
+            "如果是表情包/梗图",
+            "如果是截图，请提取关键文字",
+            "如果是普通图片，请描述主体",
+            "用中文回答，直接描述图片内容，不要客套",
+            "请基于上面的图片内容",
+            "请自然说明你暂时没看清图片",
+            "〖图片内容解析",
+            "〖图片提示〗",
+            "来自 Qwen-VL",
+            "用户配文：",
+            "建议你先确认需求细节，我可以继续协助",
         ]
 
-        for key in leak_keywords:
-            if key and key in text:
-                leak_hits += 1
+        if any(key in text for key in prompt_keywords):
+            # 如果泄漏文本里混有真正图片描述，尽量保留图片描述；否则直接安全兜底。
+            extracted: list[str] = []
+            for raw_line in text.splitlines():
+                line = raw_line.strip().lstrip("-•* ").strip()
+                if not line:
+                    continue
+                if any(key in line for key in prompt_keywords):
+                    continue
+                if line.startswith("[") and "人设" in line:
+                    continue
 
-        if custom_prompt and len(custom_prompt) >= 20:
-            # ????????????????????????
-            if custom_prompt[:20] in text:
-                leak_hits += 2
+                if "张图片：" in line:
+                    desc = line.split("张图片：", 1)[-1].strip()
+                    if desc and not any(key in desc for key in prompt_keywords):
+                        extracted.append(desc)
+                elif line.startswith("图片内容："):
+                    desc = line.split("：", 1)[-1].strip()
+                    if desc and not any(key in desc for key in prompt_keywords):
+                        extracted.append(desc)
+                elif len(line) >= 8 and "识别失败" not in line and "[CQ:" not in line:
+                    extracted.append(line)
 
-        if leak_hits >= 2:
-            return "?????????????????????"
+            if extracted:
+                desc = "；".join(extracted)
+                desc = re.sub(r"\s+", " ", desc).strip()[:180].rstrip()
+                if desc:
+                    return f"我看了下，{desc}"
 
-        return text
+            return _safe_fallback()
+
+        # 不允许把 CQ 图片原文当回复发出去
+        if "[CQ:image" in text:
+            text = re.sub(r"\[CQ:image[^\]]*\]", "这张图", text).strip()
+            if len(text) > 120:
+                text = "这张图我收到了，不过接口刚才有点抽风喵。"
+
+        # 清理旧兜底格式：[prompt] 收到：xxx。建议...
+        text = re.sub(r"^\[[\s\S]{20,800}\]\s*收到：", "收到：", text).strip()
+        text = text.replace("", "").strip()
+
+        for prefix in ("回复：", "回复:", "答：", "答:"):
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+
+        return text[:500].strip()
 
 
     def _send_via_gateway(self, chat_id: str, reply: str, message_type: str = "group") -> ToolResult:
+        """通过网关发送文本。所有文本在这里做最后一次安全过滤。"""
+        reply = self._sanitize_reply_before_send(reply)
+        if not reply:
+            return ToolResult(False, "回复为空或被安全过滤，已阻止发送。")
+
         if self.gateway_mode == "managed":
             self._refresh_managed_gateway_config()
+
         try:
             self.gateway.send_text(chat_id=chat_id, text=reply, message_type=message_type)
             gateway_result = getattr(self.gateway, "last_send_result", None)
             meta: dict[str, Any] = {"chat_id": chat_id, "message_type": message_type, "reply": reply}
+
             if isinstance(gateway_result, dict):
                 meta.update(gateway_result)
+
                 if not gateway_result.get("success", True) and self._gateway_result_is_unauthorized(gateway_result):
                     refreshed = self._refresh_managed_gateway_config(force=True)
                     if refreshed:
@@ -461,16 +563,25 @@ class QQAutoReplyTool(BaseTool):
                             meta.update(retry_result)
                             meta["retried_after_refresh"] = True
                             if retry_result.get("success", True):
+                                meta["reply"] = reply
                                 return ToolResult(True, "ok", meta)
                             if self._gateway_result_is_unauthorized(retry_result):
+                                meta["reply"] = reply
                                 return ToolResult(False, "NapCat 返回 Unauthorized：请检查 managed_access_token 是否与 NapCat 当前 API token 一致。", meta)
+                            meta["reply"] = reply
                             return ToolResult(False, f"网关发送失败：{retry_result.get('reason', retry_result.get('response', '未知错误'))}", meta)
-            if isinstance(gateway_result, dict) and not gateway_result.get("success", True):
-                reason = str(gateway_result.get("reason", "发送失败"))
-                if self._gateway_result_is_unauthorized(gateway_result):
-                    return ToolResult(False, "NapCat 返回 Unauthorized：请检查 managed_access_token 是否与 NapCat 当前 API token 一致。", meta)
-                return ToolResult(False, f"网关发送失败：{reason}", meta)
+
+                if not gateway_result.get("success", True):
+                    reason = str(gateway_result.get("reason", "发送失败"))
+                    if self._gateway_result_is_unauthorized(gateway_result):
+                        meta["reply"] = reply
+                        return ToolResult(False, "NapCat 返回 Unauthorized：请检查 managed_access_token 是否与 NapCat 当前 API token 一致。", meta)
+                    meta["reply"] = reply
+                    return ToolResult(False, f"网关发送失败：{reason}", meta)
+
+            meta["reply"] = reply
             return ToolResult(True, "ok", meta)
+
         except NotImplementedError as exc:
             return ToolResult(False, f"当前网关暂不支持真实发送：{exc}。可切换网关模式为 managed（托管账号）或 mock。")
         except Exception as exc:  # noqa: BLE001
@@ -1016,13 +1127,13 @@ class QQAutoReplyTool(BaseTool):
             if not send_result.success:
                 skipped += 1
                 continue
-            sent_parts = [reply_parts[0]]
+            sent_parts = [self._sanitize_reply_before_send(reply_parts[0])]
             for extra_part in reply_parts[1:]:
                 extra_result = self._send_via_gateway(chat_id=chat_id, reply=extra_part, message_type="private")
                 if not extra_result.success:
                     skipped += 1
                     break
-                sent_parts.append(extra_part)
+                sent_parts.append(self._sanitize_reply_before_send(extra_part))
             self.last_auto_reply[chat_id] = datetime.now()
             combined_reply = "\n\n".join(sent_parts)
             self._append_log(chat_id, safe_sender, str(item["text"]), combined_reply)
@@ -1402,6 +1513,9 @@ class QQAutoReplyTool(BaseTool):
                 mentioned=mentioned,
                 image_refs=list(image_refs),
             )
+            if source == "group" and should_reply:
+                self.pending_group_batches.pop(chat_id, None)
+                self.group_silence_count[chat_id] = 0
 
             if not should_reply:
                 # 不立刻回复，但不能丢上下文：先记住，再加入待合并队列。
@@ -1423,6 +1537,10 @@ class QQAutoReplyTool(BaseTool):
                 # 攒够几条了，本次合并回复。注意：这是合成共同意思，不是逐条回复。
                 text = batch_text
                 context_info["merge_batch"] = True
+
+                if source == "group":
+                    self.pending_group_batches.pop(chat_id, None)
+                    self.group_silence_count[chat_id] = 0
 
         elif source == "private":
             if not self.private_enabled:
@@ -1477,12 +1595,12 @@ class QQAutoReplyTool(BaseTool):
         if not send_result.success:
             return send_result
 
-        sent_parts = [reply_parts[0]]
+        sent_parts = [self._sanitize_reply_before_send(reply_parts[0])]
         for extra_part in reply_parts[1:]:
             extra_result = self._send_via_gateway(chat_id=chat_id, reply=extra_part, message_type=source)
             if not extra_result.success:
                 return extra_result
-            sent_parts.append(extra_part)
+            sent_parts.append(self._sanitize_reply_before_send(extra_part))
 
         self.last_auto_reply[chat_id] = datetime.now()
         combined_reply = "\n\n".join(sent_parts)
@@ -1960,9 +2078,9 @@ class QQAutoReplyTool(BaseTool):
                 return self._merge_reply_segments(api_reply)
             return self._split_reply_segments(api_reply)
 
-        prompt_tag = f"[{self.custom_prompt}] " if self.custom_prompt else ""
+        prompt_tag = ""
         clean_text = re.sub(r"\s+", " ", text).strip()
-        reply = f"{prompt_tag}收到：{clean_text[:120]}。建议你先确认需求细节，我可以继续协助。"
+        reply = f"接口刚才有点抽风，猫猫先不乱说喵。"
         if merge_batch:
             return self._merge_reply_segments(reply)
         return self._split_reply_segments(reply)
@@ -2033,6 +2151,7 @@ class QQAutoReplyTool(BaseTool):
         context_info = context_info or {}
         provider = self.reply_api_provider.strip().lower()
         api_key = self.reply_api_key.strip()
+
         if provider not in {"openai", "deepseek", "qwen"} or not api_key:
             self.last_reply_api_error = "未配置可用的回复 API（provider 或 api_key 缺失）"
             return None
@@ -2041,17 +2160,18 @@ class QQAutoReplyTool(BaseTool):
             return None
 
         has_image_refs = bool(context_info.get("image_refs"))
+
         if self.reply_api_model.strip():
             model_name = self.reply_api_model.strip()
         elif provider == "deepseek":
-            # DeepSeek 不支持图片输入，使用 deepseek-chat（图片会以 URL 文本形式在上下文中提供）
-            model_name = "deepseek-chat"
+            model_name = "deepseek-v4-pro"
         elif provider == "qwen":
             model_name = "qwen-vl-plus" if has_image_refs else "qwen-plus"
         elif provider == "openai":
             model_name = "gpt-4o" if has_image_refs else "gpt-4o-mini"
         else:
             model_name = "gpt-4o-mini"
+
         base_url = self.reply_api_base_url.strip()
         if provider == "deepseek" and not base_url:
             base_url = "https://api.deepseek.com"
@@ -2061,99 +2181,90 @@ class QQAutoReplyTool(BaseTool):
             base_url = "https://api.openai.com/v1"
         if provider == "qwen" and not base_url:
             base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
         endpoint = base_url.rstrip("/") + "/chat/completions"
         self.last_reply_api_endpoint = endpoint
 
-        # 从消息中提取显式指令
         _, instructions = self._extract_instruction_from_text(text)
         tone = instructions.get("tone", "")
         action = instructions.get("action", "")
 
-        # 判断当前模型是否支持图片输入
-        model_lower = model_name.lower()
-        supports_vision = any(kw in model_lower for kw in ("vl", "vision", "gpt-4o", "gpt-4.1"))
-
         context_block = self._build_context_block(text, context_info)
 
-        # 图片描述单独构建，放到 user_content 而非 system_prompt 中，避免跨轮污染
-        image_desc_block = ""
-        if has_image_refs:
-            image_refs = context_info.get("image_refs", [])
-            image_descriptions: list[str] = []
-            for ref in list(image_refs)[:3]:
-                desc = self._describe_image_content(ref, text[:200])
-                if desc:
-                    image_descriptions.append(desc)
-            if image_descriptions:
-                image_desc_block = "\n\n图片内容解析：\n" + "\n".join(f"- {d}" for d in image_descriptions)
-                stripped = text.strip()
-                if not stripped or stripped in ("图片消息", "图片", ""):
-                    text = "用户发送了一张" + image_descriptions[0]
-            else:
-                image_desc_block = "\n\n注意：当前模型无法解析图片内容。"
-
         system_prompt = (
-            "你是 QQ 自动回复助手，正在和一位真实用户聊天。"
-            "请基于上下文信息（场景、说话者、最近对话、图片内容等）生成合适的回复。\n\n"
-            "### 核心原则\n"
-            "- 回复自然简洁，像正常朋友聊天，不要过度热情、夸张或戏精。\n"
-            "- 绝对不要输出 Markdown、编号、项目符号、解释性前言（如「好的」「回复：」）或任何非回复本身的文字。\n"
-            "- 每段 20~60 字，一句话能说清就不要分多条。需要分多条时用空行分隔。\n"
-            "- 不要刻意表现幽默或活跃，除非消息内容本身适合。平和自然的聊天最优先。\n"
-            "- 除非被明确要求，否则不必每句都用感叹号、问句或表情符号结尾。\n\n"
-            "### 图片处理\n"
-            "如果上下文提供了「图片内容解析」，直接基于解析内容回复，就像你真的看到了图一样。\n"
-            "1. 表情包/梗图—自然回应图片表达的情绪或梗，简单一句即可，不用刻意搞笑。\n"
-            "2. 截图—提取图中信息直接回答或评论，简洁明了。\n"
-            "3. 普通图片—描述画面并自然接话，像「这猫好可爱」「拍得挺好看的」。\n"
-            "- 绝不说「我看不见图片」，直接基于已有信息正常回复。\n"
-            "- 如果图片信息有限，简单回应即可，不要编造细节。\n\n"
-            "### 指令执行\n"
-            "- 如果消息中有语气指令（用XX语气回、骂他、夸她）或操作指令（翻译、总结、改成英文），直接执行，不加解释。\n\n"
-            "### 上下文\n"
-            "- 保持话题连贯，不要突然切换。群聊更随意，私聊更自然。\n"
-            "- 参考历史中自己说过的话，不要重复。不确定时诚实说不知道。"
+            "你是 QQ 聊天里的自然回复助手。"
+            "回复要短、自然、像真人群友，不要写文章。"
+            "不要输出 Markdown、标题、编号、解释性前言。"
+            "群聊里要结合上下文，合并共同话题，不要逐条复读。"
+            "如果有图片内容，就直接基于图片内容自然接话。"
         )
-        # 用户自定义提示词为最高优先级
+
         if self.custom_prompt:
             custom = self.custom_prompt.strip()
-            system_prompt += f"\n\n### 🔴 最高优先级指令（来自用户设置）\n用户设置了以下自定义要求，请**最优先遵循**：\n{custom}"
+            system_prompt += f"\n\n### 最高优先级人设\n{custom}"
         if tone:
-            system_prompt += f"\n\n### 语气指令\n用户要求回复语气——「{tone}」，请严格遵循。"
+            system_prompt += f"\n\n### 语气指令\n用户要求回复语气：{tone}"
         if action:
-            system_prompt += f"\n\n### 操作指令\n用户要求执行操作——「{action}」，请直接执行。"
-        system_prompt += f"\n\n### 当前上下文\n{context_block}"
-        if context_info.get("merge_batch"):
-            system_prompt += (
-                "\n\n### 群聊合并回复模式\n"
-                "你正在回应一小段连续群聊。不要逐条回复每个人，不要写清单。"
-                "请先抓共同话题或共同情绪，再合成一到两条自然群聊回复。"
-                "如果话题不统一，就挑最值得接的一点回复，其他轻轻带过或不提。"
-            )
+            system_prompt += f"\n\n### 操作指令\n用户要求执行操作：{action}"
+        if context_block:
+            system_prompt += f"\n\n### 当前上下文\n{context_block}"
+
         user_msg = f"收到的消息：{text}\n\n请结合上下文给出回复。"
-        if image_desc_block:
-            user_msg += image_desc_block
         user_content = self._build_user_content(user_msg, context_info)
 
-        # 根据是否有图片和指令调整 temperature
-        temperature = 0.1
-        if has_image_refs:
-            temperature = 0.2
-        if tone:
-            temperature = 0.3
+        def _content_to_text(value: Any) -> str:
+            if isinstance(value, list):
+                parts: list[str] = []
+                for part in value:
+                    if not isinstance(part, dict):
+                        continue
+                    part_type = str(part.get("type", "")).lower()
+                    if part_type == "text":
+                        parts.append(str(part.get("text", "") or ""))
+                    elif part_type in {"image_url", "input_image"}:
+                        parts.append("[图片]")
+                    else:
+                        parts.append(f"[{part_type}]")
+                return "\n".join(p for p in parts if p).strip() or "[图片]"
+            if value is None:
+                return ""
+            return str(value)
 
-        payload = {
+        # 关键：DeepSeek messages[].content 必须是纯文本，绝不能是 image_url/list。
+        if provider == "deepseek":
+            user_content = _content_to_text(user_content)
+            system_prompt = _content_to_text(system_prompt)
+
+        payload: dict[str, Any] = {
             "model": model_name,
-            "temperature": temperature,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
         }
-        if provider == "deepseek" and model_name.startswith("deepseek-v4"):
-            payload["thinking"] = {"type": "enabled"}
-            payload["reasoning_effort"] = "high"
+
+        if provider == "deepseek":
+            # 二次保险：发出前再强制纯文本化，防止任何分支又塞回 list。
+            for msg in payload.get("messages", []):
+                if isinstance(msg, dict):
+                    msg["content"] = _content_to_text(msg.get("content"))
+
+            if model_name.startswith("deepseek-v4"):
+                payload["thinking"] = {"type": "enabled"}
+                payload["reasoning_effort"] = "high"
+                payload["max_tokens"] = 500
+            else:
+                payload["temperature"] = 0.2
+        else:
+            temperature = 0.1
+            if has_image_refs:
+                temperature = 0.2
+            if tone:
+                temperature = 0.3
+            payload["temperature"] = temperature
+
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
         req = urllib.request.Request(
             endpoint,
             data=data,
@@ -2163,6 +2274,7 @@ class QQAutoReplyTool(BaseTool):
             },
             method="POST",
         )
+
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
@@ -2186,6 +2298,11 @@ class QQAutoReplyTool(BaseTool):
             self.last_reply_api_error = ""
             return content
 
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            self.last_reply_api_error = f"HTTP {exc.code} {exc.reason} | {body[:2000]}"
+            print("DeepSeek 请求失败：", self.last_reply_api_error)
+            return None
         except Exception as exc:
             self.last_reply_api_error = str(exc)
             print("DeepSeek 请求失败：", exc)
