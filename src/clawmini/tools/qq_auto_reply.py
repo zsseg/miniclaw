@@ -130,9 +130,13 @@ class QQAutoReplyTool(BaseTool):
         self.per_user_history: dict[str, list[dict[str, Any]]] = {}
         self.recent_context_limit = 8  # 从 8 减少到 4，避免上下文过度记忆
         # 群聊回复频率控制：不要每句话都回，也不要太沉默
-        self.group_reply_probability = 0.25  # 普通群消息约 28% 概率回复
-        self.group_force_after_silence = 4   # 连续忽略 4 条后，下一条强制回复
+        self.group_reply_probability = 0.12  # 普通群消息少量概率立即回复，更多进入合并队列
+        self.group_force_after_silence = 4   # 连续记录 4 条后，更倾向合并回复而不是逐条回复
         self.group_silence_count: dict[str, int] = {}
+        # 群聊合并回复：普通消息先记录/攒起来，再按共同话题合成回复
+        self.pending_group_batches: dict[str, dict[str, Any]] = {}
+        self.group_batch_min_messages = 3      # 攒够 3 条普通消息后合并回一次
+        self.group_batch_max_wait_sec = 18     # 最多等 18 秒，即使没攒够也合并回一次
 
         self.log_path = workspace_dir / "qq_auto_reply.log"
         self.config_path = workspace_dir / "qq_auto_reply_config.json"
@@ -945,7 +949,7 @@ class QQAutoReplyTool(BaseTool):
         return ToolResult(True, f"已取消待回复私聊任务：{chat_id}")
 
     def _poll_pending(self) -> ToolResult:
-        """轮询并执行到期的私聊自动回复任务。"""
+        """轮询并执行到期的私聊自动回复任务，以及群聊合并回复任务。"""
         now = datetime.now()
         due_ids = [cid for cid, item in self.pending_private.items() if item["due_at"] <= now]
         sent = 0
@@ -986,7 +990,74 @@ class QQAutoReplyTool(BaseTool):
             self._append_log(chat_id, safe_sender, str(item["text"]), combined_reply)
             self._remember_recent_exchange(chat_id, context_info["source"], str(item.get("sender_id", "")), str(item["text"]), combined_reply, context_info)
             sent += 1
-        return ToolResult(True, f"pending轮询完成：发送={sent}, 跳过={skipped}, 剩余={len(self.pending_private)}")
+
+        group_sent = 0
+        group_skipped = 0
+        due_group_ids = [
+            cid
+            for cid, item in self.pending_group_batches.items()
+            if item.get("due_at") <= now
+        ]
+        for chat_id in due_group_ids:
+            batch = self.pending_group_batches.pop(chat_id, None)
+            if not batch:
+                continue
+            messages = batch.get("messages", [])
+            if not messages:
+                continue
+            if self._is_in_cooldown(chat_id):
+                group_skipped += 1
+                continue
+            context_info = batch.get("context_info", {})
+            if not isinstance(context_info, dict):
+                context_info = {
+                    "source": "group",
+                    "chat_id": chat_id,
+                    "sender_id": "group_batch",
+                    "sender_name": "群聊合并",
+                    "image_refs": [],
+                }
+            context_info = dict(context_info)
+            context_info["source"] = "group"
+            context_info["chat_id"] = chat_id
+            context_info["merge_batch"] = True
+            context_info["batch_messages"] = list(messages)
+
+            batch_text = self._build_group_batch_text(messages)
+            reply_parts = self._build_reply_parts(batch_text, context_info=context_info)
+            if not reply_parts:
+                group_skipped += 1
+                continue
+
+            sent_parts: list[str] = []
+            for part in reply_parts[:2]:
+                send_result = self._send_via_gateway(chat_id=chat_id, reply=part, message_type="group")
+                if not send_result.success:
+                    group_skipped += 1
+                    break
+                sent_parts.append(part)
+            if not sent_parts:
+                continue
+
+            self.last_auto_reply[chat_id] = datetime.now()
+            combined_reply = "\n\n".join(sent_parts)
+            self._append_log(chat_id, "group_batch", batch_text, combined_reply)
+            self._remember_recent_exchange(
+                chat_id,
+                "group",
+                "group_batch",
+                batch_text,
+                combined_reply,
+                context_info,
+            )
+            group_sent += 1
+
+        return ToolResult(
+            True,
+            f"pending轮询完成：私聊发送={sent}, 私聊跳过={skipped}, "
+            f"群聊合并发送={group_sent}, 群聊跳过={group_skipped}, "
+            f"剩余私聊={len(self.pending_private)}, 剩余群聊批次={len(self.pending_group_batches)}"
+        )
 
     def _set_gateway(self, arguments: dict[str, Any]) -> ToolResult:
         """切换 QQ 网关实现。"""
@@ -1264,17 +1335,19 @@ class QQAutoReplyTool(BaseTool):
         raw_text = str(arguments.get("text", ""))
         text = sanitize_prompt_injection(raw_text)
         image_refs = self._extract_image_refs(arguments)
-        """
-        if source == "group":
-            mentioned = bool(arguments.get("mentioned", False))
-            mention_all = bool(arguments.get("mention_all", False))
-            if chat_id not in self.target_group_ids:
-                return ToolResult(True, "非目标群，已忽略。")
-            if mention_all:
-                return ToolResult(True, "检测到群@所有人，按规则不触发自动回复。")
-            #if not mentioned:
-            #    return ToolResult(True, "群消息未明确@我，已忽略。")
-        """
+
+        context_info = {
+            "source": source,
+            "chat_id": chat_id,
+            "sender_id": sender_id,
+            "sender_name": str(arguments.get("sender_name", "")).strip(),
+            "sender_avatar": str(arguments.get("sender_avatar", "")).strip(),
+            "group_name": str(arguments.get("group_name", "")).strip(),
+            "group_avatar": str(arguments.get("group_avatar", "")).strip(),
+            "image_refs": list(image_refs),
+            "reply_context": arguments.get("reply_context", {}),
+        }
+
         if source == "group":
             mentioned = bool(arguments.get("mentioned", False))
             mention_all = bool(arguments.get("mention_all", False))
@@ -1293,8 +1366,26 @@ class QQAutoReplyTool(BaseTool):
             )
 
             if not should_reply:
-                return ToolResult(True, reply_reason)
-            
+                # 不立刻回复，但不能丢上下文：先记住，再加入待合并队列。
+                self._remember_observed_group_message(
+                    chat_id=chat_id,
+                    sender_id=sender_id,
+                    text=text,
+                    context_info=context_info,
+                )
+                batch_ready, batch_text = self._add_group_message_to_batch(
+                    chat_id=chat_id,
+                    sender_id=sender_id,
+                    text=text,
+                    context_info=context_info,
+                )
+                if not batch_ready:
+                    return ToolResult(True, reply_reason + " 已记录到群聊上下文，等待合并回复。")
+
+                # 攒够几条了，本次合并回复。注意：这是合成共同意思，不是逐条回复。
+                text = batch_text
+                context_info["merge_batch"] = True
+
         elif source == "private":
             if not self.private_enabled:
                 return ToolResult(True, "私聊自动回复未启用。")
@@ -1322,20 +1413,24 @@ class QQAutoReplyTool(BaseTool):
             return ToolResult(False, f"未知消息来源: {source}")
 
         if self._is_in_cooldown(chat_id):
+            # 触发冷却时也不要把普通群消息丢掉。
+            if source == "group" and not context_info.get("merge_batch"):
+                self._remember_observed_group_message(
+                    chat_id=chat_id,
+                    sender_id=sender_id,
+                    text=text,
+                    context_info=context_info,
+                )
+                self._add_group_message_to_batch(
+                    chat_id=chat_id,
+                    sender_id=sender_id,
+                    text=text,
+                    context_info=context_info,
+                )
+                return ToolResult(True, "触发频率控制：已记录到群聊上下文，等待合并回复。")
             return ToolResult(True, "触发频率控制：30秒内不重复回复。")
 
         safe_sender = f"user_{abs(hash(sender_id)) % 10000}"
-        context_info = {
-            "source": source,
-            "chat_id": chat_id,
-            "sender_id": sender_id,
-            "sender_name": str(arguments.get("sender_name", "")).strip(),
-            "sender_avatar": str(arguments.get("sender_avatar", "")).strip(),
-            "group_name": str(arguments.get("group_name", "")).strip(),
-            "group_avatar": str(arguments.get("group_avatar", "")).strip(),
-            "image_refs": list(image_refs),
-            "reply_context": arguments.get("reply_context", {}),
-        }
         reply_parts = self._build_reply_parts(text, context_info=context_info)
         if not reply_parts:
             return ToolResult(False, "未生成可发送的回复内容。")
@@ -1375,6 +1470,111 @@ class QQAutoReplyTool(BaseTool):
         reply_summary = combined_reply if len(sent_parts) == 1 else f"{len(sent_parts)} 条消息"
         return ToolResult(True, f"已自动回复到 {chat_id}: {reply_summary}", meta)
 
+    def _remember_observed_group_message(
+        self,
+        chat_id: str,
+        sender_id: str,
+        text: str,
+        context_info: dict[str, Any],
+    ) -> None:
+        """只记录群消息，不添加机器人回复。用于普通消息暂不回复但保留上下文。"""
+        history = self.recent_messages.setdefault(chat_id, [])
+        sender_name = context_info.get("sender_name", "") or sender_id
+        group_name = context_info.get("group_name", "")
+        group_avatar = context_info.get("group_avatar", "")
+        image_refs = [
+            str(item).strip()
+            for item in context_info.get("image_refs", [])
+            if str(item).strip()
+        ]
+        entry_user = {
+            "role": "user",
+            "speaker": sender_name,
+            "sender_id": sender_id,
+            "text": text[:400],
+            "source": "group",
+            "group_name": group_name,
+            "group_avatar": group_avatar,
+            "image_refs": image_refs,
+        }
+        is_dup = False
+        if history:
+            for item in reversed(history):
+                if item.get("role") == "user":
+                    if item.get("sender_id") == sender_id and item.get("text") == text[:400]:
+                        is_dup = True
+                    break
+        if not is_dup:
+            history.append(entry_user)
+            self.recent_messages[chat_id] = history[-self.recent_context_limit:]
+
+    def _add_group_message_to_batch(
+        self,
+        chat_id: str,
+        sender_id: str,
+        text: str,
+        context_info: dict[str, Any],
+    ) -> tuple[bool, str]:
+        """把普通群消息加入待合并队列。返回：是否应该现在合并回复、合并后的用户输入。"""
+        now = datetime.now()
+        batch = self.pending_group_batches.get(chat_id)
+        if not batch:
+            batch = {
+                "due_at": now + timedelta(seconds=self.group_batch_max_wait_sec),
+                "messages": [],
+                "context_info": dict(context_info),
+            }
+            self.pending_group_batches[chat_id] = batch
+
+        sender_name = context_info.get("sender_name", "") or sender_id
+        current = {
+            "sender_id": sender_id,
+            "sender_name": sender_name,
+            "text": text,
+            "image_refs": list(context_info.get("image_refs", [])),
+        }
+        messages = batch.setdefault("messages", [])
+        if not messages or not (
+            str(messages[-1].get("sender_id", "")) == sender_id
+            and str(messages[-1].get("text", "")) == text
+        ):
+            messages.append(current)
+        batch["context_info"] = dict(context_info)
+        batch["context_info"]["batch_messages"] = list(messages)
+
+        if len(messages) >= self.group_batch_min_messages:
+            combined = self._build_group_batch_text(messages)
+            self.pending_group_batches.pop(chat_id, None)
+            context_info["batch_messages"] = list(messages)
+            return True, combined
+        return False, ""
+
+    def _build_group_batch_text(self, messages: list[dict[str, Any]]) -> str:
+        """把几条群消息合并成一次给模型看的输入。"""
+        lines = [
+            "下面是群里刚刚连续聊的几句话。",
+            "请先理解它们是不是在围绕同一件事、同一个梗、同一个问题或同一种情绪。",
+            "回复要求：",
+            "1. 不要逐条分别回复每个人，不要写成清单。",
+            "2. 尽量把几句话的共同意思合成一到两条自然群聊回复。",
+            "3. 如果几句话其实不是同一话题，就挑最值得接的一点回复，其他只轻轻带过或不提。",
+            "4. 可以输出一条，也可以输出两条；但不要一人一句地机械对应。",
+            "5. 像正常群友接话，简短自然，不要总结腔。",
+            "",
+            "群聊片段：",
+        ]
+        for item in messages[-5:]:
+            name = str(item.get("sender_name", "") or item.get("sender_id", "") or "未知")
+            uid = str(item.get("sender_id", "") or "未知")
+            msg_text = str(item.get("text", "") or "").strip()
+            image_refs = item.get("image_refs", []) or []
+            if image_refs:
+                msg_text += f" [附带{len(image_refs)}张图片]"
+            lines.append(f"- {name}(ID={uid})：{msg_text}")
+        lines.append("")
+        lines.append("现在请基于这些消息合成回复，最多两条，每条尽量 20~80 字。")
+        return "\n".join(lines)
+
     def _should_reply_to_group_message(
         self,
         chat_id: str,
@@ -1382,7 +1582,7 @@ class QQAutoReplyTool(BaseTool):
         mentioned: bool,
         image_refs: list[str],
     ) -> tuple[bool, str]:
-        """控制群聊回复频率：@/图片/明确问题必回，普通闲聊概率回复，沉默太久强制回。"""
+        """控制群聊回复频率：@/图片/明确问题必回，普通闲聊更多进入合并队列。"""
         clean_text = str(text or "").strip()
         silence = self.group_silence_count.get(chat_id, 0)
 
@@ -1396,32 +1596,30 @@ class QQAutoReplyTool(BaseTool):
             self.group_silence_count[chat_id] = 0
             return True, "检测到图片，触发回复。"
 
-        # 3. 明显是在提问或叫机器人，较大概率/直接回复
+        # 3. 明显是在提问或叫机器人：立即回复
         force_keywords = [
             "机器人", "bot", "Bot", "AI", "ai",
             "你觉得", "你认为", "你说", "问你",
             "怎么", "咋", "为什么", "为啥", "什么", "啥",
             "谁", "哪", "吗", "呢", "？", "?",
         ]
-
         if any(key in clean_text for key in force_keywords):
             self.group_silence_count[chat_id] = 0
             return True, "检测到问题/点名关键词，触发回复。"
 
-        # 4. 连续沉默太久，强制回一次，避免太少说话
+        # 4. 记录太多条了，不是立即逐条回，而是推进合并队列
         if silence >= self.group_force_after_silence:
             self.group_silence_count[chat_id] = 0
-            return True, f"已连续忽略 {silence} 条，强制回复一次。"
+            return False, f"已连续记录 {silence} 条，等待合并回复。"
 
-        # 5. 普通闲聊：按概率回复
+        # 5. 普通闲聊：少量概率立即回复，大多数进入合并队列
         if random.random() < self.group_reply_probability:
             self.group_silence_count[chat_id] = 0
             return True, "普通群消息概率触发回复。"
 
-        # 6. 本条忽略
+        # 6. 本条不立即回，但会被记录和合并
         self.group_silence_count[chat_id] = silence + 1
-        return False, f"普通群消息未触发回复，已连续忽略 {silence + 1} 条。"
-
+        return False, f"普通群消息暂不立即回复，已连续记录 {silence + 1} 条。"
 
     def _is_in_cooldown(self, chat_id: str) -> bool:
         last = self.last_auto_reply.get(chat_id)
@@ -1469,6 +1667,13 @@ class QQAutoReplyTool(BaseTool):
             "image_refs": [],
         }
 
+        # 合并回复模式下，用户的多条消息已经通过 _remember_observed_group_message 单独记录过；
+        # 这里只追加机器人回复，避免把整段批处理提示词当成用户消息写进历史。
+        if source == "group" and context_info.get("merge_batch"):
+            history.append(entry_asst)
+            self.recent_messages[chat_id] = history[-self.recent_context_limit:]
+            return
+
         # 去重：如果最后一条用户消息（来自同一个人，文本相同），则不重复添加
         # 防止同一事件被触发两次导致历史中出现完全相同的消息
         is_dup = False
@@ -1509,10 +1714,12 @@ class QQAutoReplyTool(BaseTool):
         """使用 VL 模型描述图片的具体内容，特别是表情包中的文字、梗、表情等。
         独立使用 qwen-vl-plus 进行图片分析，不依赖主回复 provider。
         """
-        # 使用内置的 qwen API key 进行图片描述
-        vl_api_key = "sk-60e843eb0fa347cda5f78a5b8c4de8f7"
-        vl_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        vl_model = "qwen-vl-plus"
+        # 使用环境变量中的 Qwen-VL 配置进行图片描述，避免把 API Key 写死在源码里
+        vl_api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
+        if not vl_api_key:
+            return None
+        vl_base_url = os.getenv("QWEN_VL_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1").strip()
+        vl_model = os.getenv("QWEN_VL_MODEL", "qwen-vl-plus").strip() or "qwen-vl-plus"
         endpoint = vl_base_url.rstrip("/") + "/chat/completions"
 
         # 获取图片 base64
@@ -1705,17 +1912,69 @@ class QQAutoReplyTool(BaseTool):
 
     def _build_reply_parts(self, text: str, context_info: dict[str, Any] | None = None) -> list[str]:
         context_info = context_info or {}
+        merge_batch = bool(context_info.get("merge_batch", False))
         self.last_reply_api_source = "local"
         self.last_reply_api_error = ""
         self.last_reply_api_endpoint = ""
         api_reply = self._generate_reply_via_api(text, context_info=context_info)
         if api_reply:
+            if merge_batch:
+                return self._merge_reply_segments(api_reply)
             return self._split_reply_segments(api_reply)
 
         prompt_tag = f"[{self.custom_prompt}] " if self.custom_prompt else ""
         clean_text = re.sub(r"\s+", " ", text).strip()
         reply = f"{prompt_tag}收到：{clean_text[:120]}。建议你先确认需求细节，我可以继续协助。"
+        if merge_batch:
+            return self._merge_reply_segments(reply)
         return self._split_reply_segments(reply)
+
+    def _merge_reply_segments(self, reply: str) -> list[str]:
+        """群聊合并回复专用：允许 1~2 条，但尽量合并共同意思，避免逐条回复。"""
+        normalized = re.sub(r"\r\n?", "\n", str(reply or "")).strip()
+        if not normalized:
+            return []
+
+        lines: list[str] = []
+        for line in normalized.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            # 去掉编号、项目符号和“对某人：”这种逐条回复痕迹
+            line = re.sub(r"^(?:[-*•]|\d+[.)、])\s*", "", line).strip()
+            line = re.sub(r"^(?:对|回复)?[^：:]{1,12}[：:]\s*", "", line).strip()
+            if line:
+                lines.append(line)
+
+        if not lines:
+            return []
+
+        merged = "；".join(lines)
+        merged = re.sub(r"\s+", " ", merged).strip()
+
+        # 如果模型已经很短，就只发一条。
+        if len(merged) <= 180:
+            return [merged]
+
+        # 过长时才拆成最多两条，按标点尽量自然切开，不按原消息数量拆。
+        sentences = [part.strip() for part in re.split(r"(?<=[。！？!?；;])", merged) if part.strip()]
+        if not sentences:
+            return [merged[:180]]
+
+        parts: list[str] = []
+        buf = ""
+        for sent in sentences:
+            if len(buf) + len(sent) <= 120:
+                buf += sent
+            else:
+                if buf:
+                    parts.append(buf[:160])
+                buf = sent
+        if buf:
+            parts.append(buf[:160])
+        if len(parts) > 2:
+            parts = [parts[0], "".join(parts[1:])[:160]]
+        return [part for part in parts[:2] if part]
 
     def _split_reply_segments(self, reply: str) -> list[str]:
         normalized = re.sub(r"\r\n?", "\n", str(reply)).strip()
@@ -1826,6 +2085,13 @@ class QQAutoReplyTool(BaseTool):
         if action:
             system_prompt += f"\n\n### 操作指令\n用户要求执行操作——「{action}」，请直接执行。"
         system_prompt += f"\n\n### 当前上下文\n{context_block}"
+        if context_info.get("merge_batch"):
+            system_prompt += (
+                "\n\n### 群聊合并回复模式\n"
+                "你正在回应一小段连续群聊。不要逐条回复每个人，不要写清单。"
+                "请先抓共同话题或共同情绪，再合成一到两条自然群聊回复。"
+                "如果话题不统一，就挑最值得接的一点回复，其他轻轻带过或不提。"
+            )
         user_msg = f"收到的消息：{text}\n\n请结合上下文给出回复。"
         if image_desc_block:
             user_msg += image_desc_block
