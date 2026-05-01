@@ -1,0 +1,38 @@
+{
+  "enabled": true,
+  "private_enabled": true,
+  "paused": false,
+  "target_group_id": "demo_chat,480717696,696711054,597912657",
+  "target_group_ids": [
+    "demo_chat",
+    "480717696",
+    "696711054",
+    "597912657"
+  ],
+  "private_delay_sec": 0,
+  "custom_prompt": "",
+  "cooldown_sec": 0,
+  "self_user_id": "391143621",
+  "reply_api_provider": "deepseek",
+  "reply_api_model": "deepseek-v4-pro",
+  "reply_api_key": "sk-a9caee71817d473c9f4f18926c9da53b",
+  "reply_api_base_url": "https://api.deepseek.com",
+  "managed_account": "391143621",
+  "managed_api_base_url": "http://127.0.0.1:3000",
+  "managed_access_token": "",
+  "receive_token": "",
+  "gateway_mode": "managed",
+  "app_title_keyword": "QQ",
+  "process_name": "QQ.exe",
+  "executable_path": "",
+  "window_title": "QQ",
+  "client_binding": {
+    "app_title_keyword": "managed:391143621",
+    "process_name": "",
+    "executable_path": "",
+    "window_title": "",
+    "connected": true,
+    "bound_at": "2026-04-30T23:11:54",
+    "notes": "托管账号模式已启用，不依赖本地 QQ 窗口。"
+  }
+}

@@ -126,7 +126,7 @@ class QQAutoReplyTool(BaseTool):
         self.recent_messages: dict[str, list[dict[str, Any]]] = {}
         # 按 (chat_id, sender_id) 分别存储历史，避免群聊不同用户消息混淆
         self.per_user_history: dict[str, list[dict[str, Any]]] = {}
-        self.recent_context_limit = 4  # 从 8 减少到 4，避免上下文过度记忆
+        self.recent_context_limit = 8  # 从 8 减少到 4，避免上下文过度记忆
         self.log_path = workspace_dir / "qq_auto_reply.log"
         self.config_path = workspace_dir / "qq_auto_reply_config.json"
         self._load_config()
@@ -657,6 +657,25 @@ class QQAutoReplyTool(BaseTool):
 
         raw_body = str(arguments.get("raw_body", ""))
 
+        # 忽略 NapCat 的非消息事件，例如：
+        # post_type=notice / sub_type=input_status / status_text=对方正在输入...
+        post_type = str(payload.get("post_type", "")).lower()
+        notice_type = str(payload.get("notice_type", "")).lower()
+        sub_type = str(payload.get("sub_type", "")).lower()
+
+        if post_type and post_type != "message":
+            return ToolResult(
+                True,
+                f"已忽略非消息事件：post_type={post_type}, notice_type={notice_type}, sub_type={sub_type}",
+            )
+
+        # 防止机器人收到自己发出的消息后继续回复自己
+
+        self_id = str(payload.get("self_id", ""))
+        user_id = str(payload.get("user_id", ""))
+
+        if self_id and user_id == self_id:
+            return ToolResult(True, f"已忽略机器人自己的消息：user_id={user_id}")
         event = build_gateway_event(payload)
         if not event.chat_id:
             payload_keys = ",".join(sorted(str(key) for key in payload.keys()))
@@ -1037,8 +1056,8 @@ class QQAutoReplyTool(BaseTool):
                 return ToolResult(True, "非目标群，已忽略。")
             if mention_all:
                 return ToolResult(True, "检测到群@所有人，按规则不触发自动回复。")
-            if not mentioned:
-                return ToolResult(True, "群消息未明确@我，已忽略。")
+            #if not mentioned:
+            #    return ToolResult(True, "群消息未明确@我，已忽略。")
         elif source == "private":
             if not self.private_enabled:
                 return ToolResult(True, "私聊自动回复未启用。")
