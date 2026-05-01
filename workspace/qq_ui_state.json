@@ -20,8 +20,8 @@
   "qq_receive_token": "",
   "qq_managed_account": "391143621",
   "qq_image_recognition": true,
-  "qq_source": "private",
-  "qq_chat": "demo_chat",
+  "qq_source": "group",
+  "qq_chat": "597912657",
   "qq_sender": "user_001",
   "qq_waited_sec": 0,
   "qq_text": "你好，请帮我回复"
