@@ -131,13 +131,13 @@ class QQAutoReplyTool(BaseTool):
         self.per_user_history: dict[str, list[dict[str, Any]]] = {}
         self.recent_context_limit = 8  # 从 8 减少到 4，避免上下文过度记忆
         # 群聊回复频率控制：不要每句话都回，也不要太沉默
-        self.group_reply_probability = 0.12  # 普通群消息少量概率立即回复，更多进入合并队列
-        self.group_force_after_silence = 4   # 连续记录 4 条后，更倾向合并回复而不是逐条回复
+        self.group_reply_probability = 0.10  # 普通群消息少量概率立即回复，更多进入合并队列
+        self.group_force_after_silence = 6   # 连续记录 4 条后，更倾向合并回复而不是逐条回复
         self.group_silence_count: dict[str, int] = {}
         # 群聊合并回复：普通消息先记录/攒起来，再按共同话题合成回复
         self.pending_group_batches: dict[str, dict[str, Any]] = {}
-        self.group_batch_min_messages = 3      # 攒够 3 条普通消息后合并回一次
-        self.group_batch_max_wait_sec = 18     # 最多等 18 秒，即使没攒够也合并回一次
+        self.group_batch_min_messages = 4      # 攒够 3 条普通消息后合并回一次
+        self.group_batch_max_wait_sec = 22     # 最多等 18 秒，即使没攒够也合并回一次
 
         self.log_path = workspace_dir / "qq_auto_reply.log"
         self.config_path = workspace_dir / "qq_auto_reply_config.json"
@@ -1512,6 +1512,7 @@ class QQAutoReplyTool(BaseTool):
                 text=text,
                 mentioned=mentioned,
                 image_refs=list(image_refs),
+                context_info=context_info,
             )
             if source == "group" and should_reply:
                 self.pending_group_batches.pop(chat_id, None)
@@ -1671,7 +1672,10 @@ class QQAutoReplyTool(BaseTool):
         text: str,
         context_info: dict[str, Any],
     ) -> tuple[bool, str]:
-        """把普通群消息加入待合并队列。返回：是否应该现在合并回复、合并后的用户输入。"""
+        """把群消息加入待合并队列。
+
+        低相关消息只作为背景，只有出现和机器人有关/让机器人看图/明显提问的消息时才合并回复。
+        """
         now = datetime.now()
         batch = self.pending_group_batches.get(chat_id)
         if not batch:
@@ -1683,53 +1687,162 @@ class QQAutoReplyTool(BaseTool):
             self.pending_group_batches[chat_id] = batch
 
         sender_name = context_info.get("sender_name", "") or sender_id
+        image_refs = list(context_info.get("image_refs", []))
+        relevance, relevance_reason = self._score_group_message_relevance(
+            text=text,
+            mentioned=False,
+            image_refs=image_refs,
+            context_info=context_info,
+        )
+
         current = {
             "sender_id": sender_id,
             "sender_name": sender_name,
             "text": text,
-            "image_refs": list(context_info.get("image_refs", [])),
+            "image_refs": image_refs,
+            "reply_relevance": relevance,
+            "reply_relevance_reason": relevance_reason,
         }
+
         messages = batch.setdefault("messages", [])
         if not messages or not (
             str(messages[-1].get("sender_id", "")) == sender_id
             and str(messages[-1].get("text", "")) == text
         ):
             messages.append(current)
+
+        messages[:] = messages[-6:]
+
         batch["context_info"] = dict(context_info)
         batch["context_info"]["batch_messages"] = list(messages)
 
-        if len(messages) >= self.group_batch_min_messages:
+        relevant_messages = [
+            item for item in messages
+            if int(item.get("reply_relevance", 0) or 0) >= 45
+        ]
+        strong_messages = [
+            item for item in messages
+            if int(item.get("reply_relevance", 0) or 0) >= 70
+        ]
+
+        if not relevant_messages:
+            return False, ""
+
+        if strong_messages and (len(messages) >= 2 or len(relevant_messages) >= 1):
             combined = self._build_group_batch_text(messages)
             self.pending_group_batches.pop(chat_id, None)
             context_info["batch_messages"] = list(messages)
             return True, combined
+
+        if len(relevant_messages) >= 2 or len(messages) >= max(self.group_batch_min_messages, 4):
+            combined = self._build_group_batch_text(messages)
+            self.pending_group_batches.pop(chat_id, None)
+            context_info["batch_messages"] = list(messages)
+            return True, combined
+
         return False, ""
 
     def _build_group_batch_text(self, messages: list[dict[str, Any]]) -> str:
         """把几条群消息合并成一次给模型看的输入。"""
         lines = [
             "下面是群里刚刚连续聊的几句话。",
-            "请先理解它们是不是在围绕同一件事、同一个梗、同一个问题或同一种情绪。",
-            "回复要求：",
-            "1. 不要逐条分别回复每个人，不要写成清单。",
-            "2. 尽量把几句话的共同意思合成一到两条自然群聊回复。",
-            "3. 如果几句话其实不是同一话题，就挑最值得接的一点回复，其他只轻轻带过或不提。",
-            "4. 可以输出一条，也可以输出两条；但不要一人一句地机械对应。",
-            "5. 像正常群友接话，简短自然，不要总结腔。",
+            "你要先判断哪些内容是在和你/机器人聊天，哪些只是群友之间自己聊天。",
+            "回复策略：",
+            "1. 优先回应：@你、回复你、点名 wick/机器人/bot/猫娘、让你看图/解释图、直接问你的内容。",
+            "2. 对普通群友之间的闲聊，只当背景理解，除非很适合接一句，否则不要硬插话。",
+            "3. 如果图片只是表情包/纯图且没人问你，就少回复；如果有人问这图啥意思，再回复。",
+            "4. 不要逐条分别回复每个人，不要写成清单。",
+            "5. 尽量把共同意思合成一条自然群聊回复；最多两条，每条 20~70 字。",
+            "6. 像正常群友接话，简短自然，不要总结腔，不要刷存在感。",
             "",
             "群聊片段：",
         ]
-        for item in messages[-5:]:
+
+        for item in messages[-6:]:
             name = str(item.get("sender_name", "") or item.get("sender_id", "") or "未知")
             uid = str(item.get("sender_id", "") or "未知")
             msg_text = str(item.get("text", "") or "").strip()
             image_refs = item.get("image_refs", []) or []
+            relevance = int(item.get("reply_relevance", 0) or 0)
+            reason = str(item.get("reply_relevance_reason", "") or "")
             if image_refs:
                 msg_text += f" [附带{len(image_refs)}张图片]"
-            lines.append(f"- {name}(ID={uid})：{msg_text}")
+            lines.append(f"- {name}(ID={uid})：{msg_text} ｜相关度={relevance}｜{reason}")
+
         lines.append("")
-        lines.append("现在请基于这些消息合成回复，最多两条，每条尽量 20~80 字。")
+        lines.append("现在请只针对相关度较高、确实像是在找你聊天的内容自然回复；低相关内容只作为背景。")
         return "\n".join(lines)
+
+    def _score_group_message_relevance(
+        self,
+        text: str,
+        mentioned: bool = False,
+        image_refs: list[str] | None = None,
+        context_info: dict[str, Any] | None = None,
+    ) -> tuple[int, str]:
+        """判断群消息和机器人/当前对话的相关度。"""
+        context_info = context_info or {}
+        image_refs = image_refs or []
+        clean_text = str(text or "").strip()
+        lower = clean_text.lower()
+
+        if mentioned:
+            return 100, "被@，强相关。"
+
+        reply_context = context_info.get("reply_context", {})
+        if isinstance(reply_context, dict):
+            reply_sender = str(reply_context.get("sender_id", "") or "").strip()
+            reply_text = str(reply_context.get("text", "") or "")
+            if reply_sender and reply_sender == str(self.self_user_id):
+                return 95, "正在回复机器人上一条消息。"
+            if any(name in reply_text.lower() for name in ("wick", "redamancy", "机器人", "bot", "猫娘", "小猫")):
+                return 75, "回复的原消息像是在聊机器人。"
+
+        bot_keywords = [
+            str(self.self_user_id).strip(),
+            "wick",
+            "redamancy",
+            "机器人",
+            "bot",
+            "小bot",
+            "ai",
+            "猫娘",
+            "猫猫",
+            "小猫",
+        ]
+        bot_keywords = [k.lower() for k in bot_keywords if k]
+        if any(k and k in lower for k in bot_keywords):
+            return 90, "点名机器人/人设关键词。"
+
+        direct_patterns = [
+            "你觉得", "你认为", "你说", "你看", "你来", "你能", "你会",
+            "帮我", "帮忙", "看看", "看一下", "分析一下", "解释一下",
+            "评价一下", "说说", "回一下", "答一下",
+        ]
+        if any(p in clean_text for p in direct_patterns):
+            return 78, "像是在直接让机器人回答。"
+
+        image_question_patterns = [
+            "这图", "这个图", "图片", "表情包", "图里", "图上",
+            "啥意思", "什么意思", "什么梗", "看懂", "看一下", "看看",
+            "是谁", "这是啥", "这是哪", "怎么回事",
+        ]
+        if image_refs:
+            if any(p in clean_text for p in image_question_patterns):
+                return 72, "图片消息且带看图/解释请求。"
+            if clean_text and clean_text not in {"图片消息", "图片", "[图片]"}:
+                return 48, "图片消息带普通配文。"
+            return 28, "纯图片/表情包，先按普通背景记录。"
+
+        question_markers = ["？", "?", "怎么", "咋", "为什么", "为啥", "什么", "啥", "谁", "哪", "吗"]
+        if any(q in clean_text for q in question_markers):
+            return 42, "普通问题，但未明确找机器人。"
+
+        soft_chat_markers = ["修好", "好了", "成功", "寄了", "坏了", "笑死", "草", "绷", "逆天", "好耶", "yes"]
+        if any(k in lower for k in soft_chat_markers):
+            return 30, "普通情绪/状态消息。"
+
+        return 12, "普通群聊背景。"
 
     def _should_reply_to_group_message(
         self,
@@ -1737,45 +1850,48 @@ class QQAutoReplyTool(BaseTool):
         text: str,
         mentioned: bool,
         image_refs: list[str],
+        context_info: dict[str, Any] | None = None,
     ) -> tuple[bool, str]:
-        """控制群聊回复频率：@/图片/明确问题必回，普通闲聊更多进入合并队列。"""
-        clean_text = str(text or "").strip()
+        """控制群聊回复频率：更关注和机器人有关的内容；图片也受频率/相关度控制。"""
+        score, score_reason = self._score_group_message_relevance(
+            text=text,
+            mentioned=mentioned,
+            image_refs=image_refs,
+            context_info=context_info,
+        )
         silence = self.group_silence_count.get(chat_id, 0)
 
-        # 1. 被 @ 必回
-        if mentioned:
+        if score >= 90:
             self.group_silence_count[chat_id] = 0
-            return True, "被@，必回。"
+            return True, f"{score_reason} 立即回复。"
 
-        # 2. 有图片时优先回复，方便识图
-        if image_refs:
-            self.group_silence_count[chat_id] = 0
-            return True, "检测到图片，触发回复。"
+        if score >= 70:
+            if silence >= 1 or random.random() < 0.78:
+                self.group_silence_count[chat_id] = 0
+                return True, f"{score_reason} 高相关触发回复。"
+            self.group_silence_count[chat_id] = silence + 1
+            return False, f"{score_reason} 但本次进入合并队列，已连续记录 {silence + 1} 条。"
 
-        # 3. 明显是在提问或叫机器人：立即回复
-        force_keywords = [
-            "机器人", "bot", "Bot", "AI", "ai",
-            "你觉得", "你认为", "你说", "问你",
-            "怎么", "咋", "为什么", "为啥", "什么", "啥",
-            "谁", "哪", "吗", "呢", "？", "?",
-        ]
-        if any(key in clean_text for key in force_keywords):
-            self.group_silence_count[chat_id] = 0
-            return True, "检测到问题/点名关键词，触发回复。"
+        if score >= 45:
+            probability = 0.32 if image_refs else 0.22
+            if silence >= 3 or random.random() < probability:
+                self.group_silence_count[chat_id] = 0
+                return True, f"{score_reason} 中等相关概率触发回复。"
+            self.group_silence_count[chat_id] = silence + 1
+            return False, f"{score_reason} 暂不立即回复，已记录 {silence + 1} 条。"
 
-        # 4. 记录太多条了，不是立即逐条回，而是推进合并队列
-        if silence >= self.group_force_after_silence:
-            self.group_silence_count[chat_id] = 0
-            return False, f"已连续记录 {silence} 条，等待合并回复。"
+        if score >= 30:
+            if silence >= self.group_force_after_silence and random.random() < 0.35:
+                self.group_silence_count[chat_id] = 0
+                return True, f"{score_reason} 沉默较久，低频接话。"
+            if random.random() < self.group_reply_probability:
+                self.group_silence_count[chat_id] = 0
+                return True, f"{score_reason} 低概率接话。"
+            self.group_silence_count[chat_id] = silence + 1
+            return False, f"{score_reason} 作为背景记录，已连续记录 {silence + 1} 条。"
 
-        # 5. 普通闲聊：少量概率立即回复，大多数进入合并队列
-        if random.random() < self.group_reply_probability:
-            self.group_silence_count[chat_id] = 0
-            return True, "普通群消息概率触发回复。"
-
-        # 6. 本条不立即回，但会被记录和合并
-        self.group_silence_count[chat_id] = silence + 1
-        return False, f"普通群消息暂不立即回复，已连续记录 {silence + 1} 条。"
+        self.group_silence_count[chat_id] = min(silence + 1, self.group_force_after_silence + 2)
+        return False, f"{score_reason} 不主动回复，仅记录上下文。"
 
     def _is_in_cooldown(self, chat_id: str) -> bool:
         last = self.last_auto_reply.get(chat_id)
@@ -2195,7 +2311,7 @@ class QQAutoReplyTool(BaseTool):
             "你是 QQ 聊天里的自然回复助手。"
             "回复要短、自然、像真人群友，不要写文章。"
             "不要输出 Markdown、标题、编号、解释性前言。"
-            "群聊里要结合上下文，合并共同话题，不要逐条复读。"
+            "群聊里要结合上下文，合并共同话题，不要逐条复读。优先回应明确在找你/机器人聊天的内容；普通群友之间的闲聊只当背景，不要硬插话。"
             "如果有图片内容，就直接基于图片内容自然接话。"
         )
 
