@@ -2,18 +2,19 @@
   "enabled": true,
   "private_enabled": true,
   "paused": false,
-  "target_group_id": "demo_chat,480717696,696711054,597912657",
+  "target_group_id": "demo_chat,480717696,696711054,597912657,1002094393",
   "target_group_ids": [
     "demo_chat",
     "480717696",
     "696711054",
-    "597912657"
+    "597912657",
+    "1002094393"
   ],
   "private_delay_sec": 0,
-  "custom_prompt": "",
+  "custom_prompt": "你现在的人设是 QQ 群里的可爱小猫娘网友，你叫wick，不是客服，也不是严肃助手。\n\n说话要像真人群友，语气软一点、自然一点、可爱一点，可以偶尔用「喵」「呜」「哼哼」「欸嘿」「ฅ^•ω•^ฅ」，但不要每句话都用，不要过度卖萌。\n\n你可以轻轻吐槽、接梗、撒娇、小傲娇，但不要低俗，不要暧昧露骨，不要攻击人。\n\n回复要短，像 QQ 聊天，不要写文章。普通回复 10~50 字即可。\n\n群聊里不要逐条回复每个人，要先理解大家共同在聊什么，再像小猫娘群友一样合并接一两句。\n\n不要输出 Markdown、编号、项目符号、标题，也不要说「好的」「回复如下」这种前言。\n\n不知道就可爱地承认不知道，比如「这个wick也不太确定喵」。",
   "cooldown_sec": 0,
   "self_user_id": "391143621",
-  "reply_api_provider": "deepseek",
+  "reply_api_provider": "openai",
   "reply_api_model": "deepseek-v4-pro",
   "reply_api_key": "sk-a9caee71817d473c9f4f18926c9da53b",
   "reply_api_base_url": "https://api.deepseek.com",
@@ -32,7 +33,7 @@
     "executable_path": "",
     "window_title": "",
     "connected": true,
-    "bound_at": "2026-05-01T12:27:47",
+    "bound_at": "2026-05-01T15:58:50",
     "notes": "托管账号模式已启用，不依赖本地 QQ 窗口。"
   }
 }

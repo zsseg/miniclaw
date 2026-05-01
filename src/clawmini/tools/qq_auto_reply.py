@@ -405,6 +405,44 @@ class QQAutoReplyTool(BaseTool):
                 return content
         return text
 
+
+    def _sanitize_reply_before_send(self, reply: str) -> str:
+        """????????????????/??????? QQ?"""
+        text = str(reply or "").strip()
+        if not text:
+            return text
+
+        custom_prompt = str(getattr(self, "custom_prompt", "") or "").strip()
+
+        leak_hits = 0
+        leak_keywords = [
+            "??????",
+            "????",
+            "system prompt",
+            "### ??",
+            "### ????",
+            "### ?????",
+            "???? Markdown",
+            "??????",
+            "??????????",
+            "?????",
+        ]
+
+        for key in leak_keywords:
+            if key and key in text:
+                leak_hits += 1
+
+        if custom_prompt and len(custom_prompt) >= 20:
+            # ????????????????????????
+            if custom_prompt[:20] in text:
+                leak_hits += 2
+
+        if leak_hits >= 2:
+            return "?????????????????????"
+
+        return text
+
+
     def _send_via_gateway(self, chat_id: str, reply: str, message_type: str = "group") -> ToolResult:
         if self.gateway_mode == "managed":
             self._refresh_managed_gateway_config()
@@ -974,7 +1012,7 @@ class QQAutoReplyTool(BaseTool):
             if not reply_parts:
                 skipped += 1
                 continue
-            send_result = self._send_via_gateway(chat_id=chat_id, reply=reply_parts[0], message_type="private")
+            send_result = self._send_via_gateway(chat_id=chat_id, reply=self._sanitize_reply_before_send(reply_parts[0]), message_type="private")
             if not send_result.success:
                 skipped += 1
                 continue
@@ -1031,7 +1069,7 @@ class QQAutoReplyTool(BaseTool):
 
             sent_parts: list[str] = []
             for part in reply_parts[:2]:
-                send_result = self._send_via_gateway(chat_id=chat_id, reply=part, message_type="group")
+                send_result = self._send_via_gateway(chat_id=chat_id, reply=self._sanitize_reply_before_send(part), message_type="group")
                 if not send_result.success:
                     group_skipped += 1
                     break
@@ -1435,7 +1473,7 @@ class QQAutoReplyTool(BaseTool):
         if not reply_parts:
             return ToolResult(False, "未生成可发送的回复内容。")
 
-        send_result = self._send_via_gateway(chat_id=chat_id, reply=reply_parts[0], message_type=source)
+        send_result = self._send_via_gateway(chat_id=chat_id, reply=self._sanitize_reply_before_send(reply_parts[0]), message_type=source)
         if not send_result.success:
             return send_result
 
