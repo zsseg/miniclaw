@@ -1474,6 +1474,74 @@ class QQAutoReplyTool(BaseTool):
         self.executable_path = str(arguments.get("executable_path", self.executable_path))
         self.window_title = str(arguments.get("window_title", self.window_title))
 
+    def _text_refers_to_recent_image(self, text: str) -> bool:
+        clean = str(text or "").strip()
+        if not clean:
+            return False
+        image_words = [
+            "这个图", "这图", "这张图", "刚才的图", "上面的图", "上一张图",
+            "那个图", "那张图", "图片", "表情包", "表情", "图里", "图上",
+        ]
+        ask_words = [
+            "什么意思", "啥意思", "什么梗", "看懂", "看一下", "看看",
+            "是谁", "这是啥", "这是哪", "怎么回事", "解释", "意思",
+        ]
+        return any(w in clean for w in image_words) and any(w in clean for w in ask_words)
+
+    def _collect_recent_group_image_refs(self, chat_id: str, sender_id: str = "", limit: int = 3) -> list[str]:
+        """从待合并队列和最近历史里找同群最近图片。
+
+        用于这种场景：
+        群友先发一张图/表情包，下一句 @机器人 “这个图是什么意思”。
+        第二条消息本身没有 image_refs，但应该引用上一张图。
+        """
+        refs: list[str] = []
+        seen: set[str] = set()
+
+        def add_ref(value: Any) -> None:
+            ref = str(value or "").strip()
+            if not ref or ref in seen:
+                return
+            seen.add(ref)
+            refs.append(ref)
+
+        batch = self.pending_group_batches.get(chat_id)
+        if isinstance(batch, dict):
+            messages = batch.get("messages", [])
+            if isinstance(messages, list):
+                for item in reversed(messages):
+                    if not isinstance(item, dict):
+                        continue
+                    for ref in item.get("image_refs", []) or []:
+                        add_ref(ref)
+                        if len(refs) >= limit:
+                            return refs
+
+        history = self.recent_messages.get(chat_id, [])
+        if isinstance(history, list):
+            for item in reversed(history):
+                if not isinstance(item, dict):
+                    continue
+                # 优先同一发送者，但不强制，因为群里经常有人问别人刚发的图
+                for ref in item.get("image_refs", []) or []:
+                    add_ref(ref)
+                    if len(refs) >= limit:
+                        return refs
+
+        if sender_id:
+            user_key = f"{chat_id}|{sender_id}"
+            user_history = self.per_user_history.get(user_key, [])
+            if isinstance(user_history, list):
+                for item in reversed(user_history):
+                    if not isinstance(item, dict):
+                        continue
+                    for ref in item.get("image_refs", []) or []:
+                        add_ref(ref)
+                        if len(refs) >= limit:
+                            return refs
+
+        return refs
+
     def _handle_message(self, arguments: dict[str, Any]) -> ToolResult:
         if not self.enabled or self.paused:
             return ToolResult(True, "自动回复已禁用或处于安静模式。")
@@ -1507,6 +1575,15 @@ class QQAutoReplyTool(BaseTool):
             if mention_all:
                 return ToolResult(True, "检测到群@所有人，按规则不触发自动回复。")
 
+            # 如果用户说“这个图是什么意思”，但当前消息本身没有图片，
+            # 就把同群最近一张图/表情包补进本次上下文，并清掉待合并队列，避免双回复。
+            if not image_refs and self._text_refers_to_recent_image(text):
+                recent_image_refs = self._collect_recent_group_image_refs(chat_id, sender_id)
+                if recent_image_refs:
+                    image_refs = list(recent_image_refs)
+                    context_info["image_refs"] = list(recent_image_refs)
+                    context_info["recent_image_context"] = True
+
             should_reply, reply_reason = self._should_reply_to_group_message(
                 chat_id=chat_id,
                 text=text,
@@ -1515,7 +1592,23 @@ class QQAutoReplyTool(BaseTool):
                 context_info=context_info,
             )
             if source == "group" and should_reply:
-                self.pending_group_batches.pop(chat_id, None)
+                pending_batch = self.pending_group_batches.pop(chat_id, None)
+                if isinstance(pending_batch, dict):
+                    pending_messages = pending_batch.get("messages", [])
+                    if isinstance(pending_messages, list) and pending_messages:
+                        context_info["batch_messages"] = list(pending_messages)
+                        pending_refs: list[str] = []
+                        for _item in pending_messages:
+                            if not isinstance(_item, dict):
+                                continue
+                            for _ref in _item.get("image_refs", []) or []:
+                                _ref = str(_ref).strip()
+                                if _ref and _ref not in pending_refs:
+                                    pending_refs.append(_ref)
+                        if pending_refs and not context_info.get("image_refs"):
+                            context_info["image_refs"] = pending_refs[:3]
+                            image_refs = pending_refs[:3]
+                            context_info["recent_image_context"] = True
                 self.group_silence_count[chat_id] = 0
 
             if not should_reply:
@@ -1570,6 +1663,11 @@ class QQAutoReplyTool(BaseTool):
             return ToolResult(False, f"未知消息来源: {source}")
 
         if self._is_in_cooldown(chat_id):
+            if source == "group":
+                score, _reason = self._score_group_message_relevance(text, False, list(context_info.get("image_refs", [])), context_info)
+                if score >= 70:
+                    self._remember_observed_group_message(chat_id=chat_id, sender_id=sender_id, text=text, context_info=context_info)
+                    return ToolResult(True, "触发频率控制：高相关消息已记录，但不再进入合并队列，避免重复回复。")
             # 触发冷却时也不要把普通群消息丢掉。
             if source == "group" and not context_info.get("merge_batch"):
                 self._remember_observed_group_message(
@@ -1712,7 +1810,6 @@ class QQAutoReplyTool(BaseTool):
             messages.append(current)
 
         messages[:] = messages[-6:]
-
         batch["context_info"] = dict(context_info)
         batch["context_info"]["batch_messages"] = list(messages)
 
@@ -1728,7 +1825,7 @@ class QQAutoReplyTool(BaseTool):
         if not relevant_messages:
             return False, ""
 
-        if strong_messages and (len(messages) >= 2 or len(relevant_messages) >= 1):
+        if strong_messages and len(messages) >= 2:
             combined = self._build_group_batch_text(messages)
             self.pending_group_batches.pop(chat_id, None)
             context_info["batch_messages"] = list(messages)
@@ -1844,6 +1941,78 @@ class QQAutoReplyTool(BaseTool):
 
         return 12, "普通群聊背景。"
 
+    def _score_group_message_relevance(
+        self,
+        text: str,
+        mentioned: bool = False,
+        image_refs: list[str] | None = None,
+        context_info: dict[str, Any] | None = None,
+    ) -> tuple[int, str]:
+        """判断群消息和机器人/当前对话的相关度。"""
+        context_info = context_info or {}
+        image_refs = image_refs or []
+        clean_text = str(text or "").strip()
+        lower = clean_text.lower()
+
+        if mentioned:
+            return 100, "被@，强相关。"
+
+        reply_context = context_info.get("reply_context", {})
+        if isinstance(reply_context, dict):
+            reply_sender = str(reply_context.get("sender_id", "") or "").strip()
+            reply_text = str(reply_context.get("text", "") or "")
+            if reply_sender and reply_sender == str(self.self_user_id):
+                return 95, "正在回复机器人上一条消息。"
+            if any(name in reply_text.lower() for name in ("wick", "redamancy", "机器人", "bot", "猫娘", "小猫")):
+                return 75, "回复的原消息像是在聊机器人。"
+
+        bot_keywords = [
+            str(self.self_user_id).strip(),
+            "wick",
+            "redamancy",
+            "机器人",
+            "bot",
+            "小bot",
+            "ai",
+            "猫娘",
+            "猫猫",
+            "小猫",
+        ]
+        bot_keywords = [k.lower() for k in bot_keywords if k]
+        if any(k and k in lower for k in bot_keywords):
+            return 90, "点名机器人/人设关键词。"
+
+        direct_patterns = [
+            "你觉得", "你认为", "你说", "你看", "你来", "你能", "你会",
+            "帮我", "帮忙", "看看", "看一下", "分析一下", "解释一下",
+            "评价一下", "说说", "回一下", "答一下",
+        ]
+        if any(p in clean_text for p in direct_patterns):
+            return 78, "像是在直接让机器人回答。"
+
+        image_question_patterns = [
+            "这图", "这个图", "这张图", "刚才的图", "上面的图", "上一张图",
+            "图片", "表情包", "表情", "图里", "图上",
+            "啥意思", "什么意思", "什么梗", "看懂", "看一下", "看看",
+            "是谁", "这是啥", "这是哪", "怎么回事",
+        ]
+        if image_refs:
+            if any(p in clean_text for p in image_question_patterns) or context_info.get("recent_image_context"):
+                return 76, "正在问最近图片/表情包。"
+            if clean_text and clean_text not in {"图片消息", "图片", "[图片]"}:
+                return 48, "图片消息带普通配文。"
+            return 24, "纯图片/表情包，只作为背景记录。"
+
+        question_markers = ["？", "?", "怎么", "咋", "为什么", "为啥", "什么", "啥", "谁", "哪", "吗"]
+        if any(q in clean_text for q in question_markers):
+            return 42, "普通问题，但未明确找机器人。"
+
+        soft_chat_markers = ["修好", "好了", "成功", "寄了", "坏了", "笑死", "草", "绷", "逆天", "好耶", "yes"]
+        if any(k in lower for k in soft_chat_markers):
+            return 30, "普通情绪/状态消息。"
+
+        return 12, "普通群聊背景。"
+
     def _should_reply_to_group_message(
         self,
         chat_id: str,
@@ -1866,14 +2035,14 @@ class QQAutoReplyTool(BaseTool):
             return True, f"{score_reason} 立即回复。"
 
         if score >= 70:
-            if silence >= 1 or random.random() < 0.78:
+            if silence >= 1 or random.random() < 0.80:
                 self.group_silence_count[chat_id] = 0
                 return True, f"{score_reason} 高相关触发回复。"
             self.group_silence_count[chat_id] = silence + 1
             return False, f"{score_reason} 但本次进入合并队列，已连续记录 {silence + 1} 条。"
 
         if score >= 45:
-            probability = 0.32 if image_refs else 0.22
+            probability = 0.26 if image_refs else 0.18
             if silence >= 3 or random.random() < probability:
                 self.group_silence_count[chat_id] = 0
                 return True, f"{score_reason} 中等相关概率触发回复。"
@@ -1881,7 +2050,7 @@ class QQAutoReplyTool(BaseTool):
             return False, f"{score_reason} 暂不立即回复，已记录 {silence + 1} 条。"
 
         if score >= 30:
-            if silence >= self.group_force_after_silence and random.random() < 0.35:
+            if silence >= self.group_force_after_silence and random.random() < 0.28:
                 self.group_silence_count[chat_id] = 0
                 return True, f"{score_reason} 沉默较久，低频接话。"
             if random.random() < self.group_reply_probability:
@@ -2311,7 +2480,7 @@ class QQAutoReplyTool(BaseTool):
             "你是 QQ 聊天里的自然回复助手。"
             "回复要短、自然、像真人群友，不要写文章。"
             "不要输出 Markdown、标题、编号、解释性前言。"
-            "群聊里要结合上下文，合并共同话题，不要逐条复读。优先回应明确在找你/机器人聊天的内容；普通群友之间的闲聊只当背景，不要硬插话。"
+            "群聊里要结合上下文，合并共同话题，不要逐条复读。优先回应明确在找你/机器人聊天的内容；普通群友之间的闲聊只当背景，不要硬插话。如果用户问“这个图/表情包是什么意思”，要优先结合最近一张图片理解。优先回应明确在找你/机器人聊天的内容；普通群友之间的闲聊只当背景，不要硬插话。"
             "如果有图片内容，就直接基于图片内容自然接话。"
         )
 
