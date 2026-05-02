@@ -387,12 +387,18 @@ class QQAutoReplyPanel:
         title_box = ttk.Frame(header, style="Paper.TFrame")
         title_box.grid(row=0, column=0, sticky="w")
         ttk.Label(title_box, text="QQ Bot Overview", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        # Restored operation guide
+        guide_text = (
+            "操作指引：先选网关（测试 mock / 正式 managed） → 下载 NapCat → 一键启动/填充 → 更新配置 → 模拟测试。"
+            " 缺少 pywinauto 时执行：python -m pip install pywinauto"
+        )
         ttk.Label(
             title_box,
-            text="Quick summary cards above · complete grouped settings below",
-            style="Subtitle.TLabel",
-        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
-
+            text=guide_text,
+            justify=tk.LEFT,
+            style="Muted.TLabel",
+            wraplength=820,
+        ).grid(row=2, column=0, sticky="w", pady=(6, 0))
         action_shell = tk.Frame(
             header,
             bg="#fff8e8",
@@ -2500,7 +2506,12 @@ class WorkspaceFileApp:
             self.root.after(200, self._poll_queue)
 
     def _poll_pending_private(self) -> None:
-        """轮询待发送队列：放到后台线程，避免 DeepSeek/Qwen/NapCat 阻塞 Tkinter 主线程。"""
+        """轮询待发送队列：放到后台线程，避免 DeepSeek/Qwen/NapCat 阻塞 Tkinter 主线程。
+
+        修复点：
+        poll_pending 产生的主动回复不是由 webhook 事件直接返回，
+        所以这里需要读取 result.meta["sent_replies"]，主动写入 Live Ledger。
+        """
         if not hasattr(self, "qq_panel"):
             return
 
@@ -2515,6 +2526,8 @@ class WorkspaceFileApp:
 
                 def _apply_result() -> None:
                     try:
+                        meta = result.meta if isinstance(getattr(result, "meta", None), dict) else {}
+
                         if result.success and (
                             "发送=" in result.output
                             or "群聊合并发送=" in result.output
@@ -2523,6 +2536,33 @@ class WorkspaceFileApp:
                             status_var = getattr(self.qq_panel, "qq_status_text", None)
                             if status_var is not None:
                                 status_var.set(f"轮询待回复: {result.output.strip()[:80]}")
+
+                        sent_replies = meta.get("sent_replies", [])
+                        if isinstance(sent_replies, list):
+                            for item in sent_replies:
+                                if not isinstance(item, dict):
+                                    continue
+
+                                reply = str(item.get("reply", "") or "").strip()
+                                if not reply:
+                                    continue
+
+                                source = str(item.get("source", item.get("message_type", "group")) or "group")
+                                chat_id = str(item.get("chat_id", "") or "")
+                                kind = str(item.get("kind", "") or "pending")
+
+                                send_token_hint = ""
+                                if hasattr(self.qq_panel, "qq_managed_token_var"):
+                                    raw = self.qq_panel.qq_managed_token_var.get().strip()
+                                    if raw:
+                                        send_token_hint = f" [send:{raw[-4:]}]"
+
+                                label = f"🤖 主动回复 {source}/{chat_id}{send_token_hint}"
+                                self._append_chat_message("system", f"{label}\n{reply}")
+                                self.qq_panel.append_qq_system_message(
+                                    f"主动回复已记录：{kind} | 目标：{source}/{chat_id} | 回复：{reply[:80]}"
+                                )
+
                     finally:
                         self._qq_poll_pending_running = False
 
