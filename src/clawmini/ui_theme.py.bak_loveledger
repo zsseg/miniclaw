@@ -1,0 +1,337 @@
+"""LoveLedger 风格 UI 主题。
+
+替换到:
+    src/clawmini/ui_theme.py
+
+保持兼容:
+    from clawmini.ui_theme import apply_theme
+
+风格目标:
+    - 深绿侧栏
+    - 米白纸张背景
+    - 复古账本卡片
+    - 细黑描边 + 轻微硬阴影感
+    - 衬线标题 + 清晰的中文 UI 字体
+"""
+
+from __future__ import annotations
+
+import tkinter as tk
+from tkinter import ttk
+
+
+PALETTE = {
+    # 背景
+    "paper": "#f3eee3",
+    "paper_2": "#eee6d8",
+    "card": "#fffaf0",
+    "card_alt": "#f8f1e4",
+
+    # 深色
+    "ink": "#26211f",
+    "ink_2": "#3b3530",
+    "muted": "#7b7167",
+
+    # 主题色
+    "green": "#285d52",
+    "green_dark": "#183f38",
+    "green_light": "#d9e7de",
+    "red": "#b85757",
+    "red_light": "#f1d8d4",
+    "gold": "#d49b54",
+    "bluegray": "#747a91",
+
+    # 线条/阴影
+    "border": "#27211d",
+    "soft_border": "#d6c9b8",
+    "shadow": "#1f1b18",
+    "white": "#ffffff",
+}
+
+
+FONT_UI = ("Microsoft YaHei UI", 10)
+FONT_UI_BOLD = ("Microsoft YaHei UI", 10, "bold")
+FONT_TITLE = ("Georgia", 18, "bold")
+FONT_SUBTITLE = ("Georgia", 10, "italic")
+FONT_CARD_NUM = ("Georgia", 15, "bold")
+FONT_MONO = ("Consolas", 10)
+
+
+def _safe_configure(style: ttk.Style, name: str, **kwargs) -> None:
+    try:
+        style.configure(name, **kwargs)
+    except Exception:
+        pass
+
+
+def _safe_map(style: ttk.Style, name: str, **kwargs) -> None:
+    try:
+        style.map(name, **kwargs)
+    except Exception:
+        pass
+
+
+def apply_theme(root: tk.Tk) -> None:
+    """应用 LoveLedger 风格主题。"""
+    style = ttk.Style(root)
+
+    try:
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+    except Exception:
+        pass
+
+    try:
+        root.option_add("*Font", FONT_UI)
+        root.option_add("*Background", PALETTE["paper"])
+        root.option_add("*Foreground", PALETTE["ink"])
+        root.configure(background=PALETTE["paper"])
+    except Exception:
+        pass
+
+    # 全局
+    _safe_configure(
+        style,
+        ".",
+        background=PALETTE["paper"],
+        foreground=PALETTE["ink"],
+        font=FONT_UI,
+        bordercolor=PALETTE["border"],
+        lightcolor=PALETTE["card"],
+        darkcolor=PALETTE["border"],
+    )
+
+    # Frame
+    _safe_configure(style, "TFrame", background=PALETTE["paper"])
+    _safe_configure(style, "Paper.TFrame", background=PALETTE["paper"])
+    _safe_configure(style, "Surface.TFrame", background=PALETTE["card"])
+    _safe_configure(style, "Card.TFrame", background=PALETTE["card"], relief="solid", borderwidth=1)
+    _safe_configure(style, "RaisedCard.TFrame", background=PALETTE["card"], relief="solid", borderwidth=2)
+    _safe_configure(style, "Sidebar.TFrame", background=PALETTE["green"])
+    _safe_configure(style, "SidebarFooter.TFrame", background=PALETTE["green_dark"])
+
+    # Label
+    _safe_configure(style, "TLabel", background=PALETTE["paper"], foreground=PALETTE["ink"], font=FONT_UI)
+    _safe_configure(style, "Title.TLabel", background=PALETTE["paper"], foreground=PALETTE["ink"], font=FONT_TITLE)
+    _safe_configure(style, "Hero.TLabel", background=PALETTE["paper"], foreground=PALETTE["ink"], font=FONT_TITLE)
+    _safe_configure(style, "Subtitle.TLabel", background=PALETTE["paper"], foreground=PALETTE["muted"], font=FONT_SUBTITLE)
+    _safe_configure(style, "Header.TLabel", background=PALETTE["paper"], foreground=PALETTE["ink"], font=("Georgia", 12, "bold"))
+    _safe_configure(style, "Muted.TLabel", background=PALETTE["paper"], foreground=PALETTE["muted"], font=("Microsoft YaHei UI", 9))
+    _safe_configure(style, "Card.TLabel", background=PALETTE["card"], foreground=PALETTE["ink"], font=FONT_UI)
+    _safe_configure(style, "CardTitle.TLabel", background=PALETTE["card"], foreground=PALETTE["ink"], font=("Georgia", 12, "bold"))
+    _safe_configure(style, "CardMuted.TLabel", background=PALETTE["card"], foreground=PALETTE["muted"], font=("Microsoft YaHei UI", 9))
+    _safe_configure(style, "Metric.TLabel", background=PALETTE["card"], foreground=PALETTE["ink"], font=FONT_CARD_NUM)
+
+    _safe_configure(style, "SidebarTitle.TLabel", background=PALETTE["green"], foreground=PALETTE["card"], font=("Georgia", 17, "bold"))
+    _safe_configure(style, "SidebarSub.TLabel", background=PALETTE["green"], foreground="#d7cdb9", font=("Georgia", 8))
+    _safe_configure(style, "Sidebar.TLabel", background=PALETTE["green"], foreground=PALETTE["card"], font=FONT_UI_BOLD)
+    _safe_configure(style, "SidebarMuted.TLabel", background=PALETTE["green"], foreground="#d7cdb9", font=("Microsoft YaHei UI", 8))
+
+    # LabelFrame
+    _safe_configure(
+        style,
+        "TLabelframe",
+        background=PALETTE["card"],
+        foreground=PALETTE["ink"],
+        relief="solid",
+        borderwidth=1,
+        bordercolor=PALETTE["border"],
+        padding=10,
+    )
+    _safe_configure(
+        style,
+        "TLabelframe.Label",
+        background=PALETTE["paper"],
+        foreground=PALETTE["ink"],
+        font=("Georgia", 11, "bold"),
+    )
+    _safe_configure(
+        style,
+        "Card.TLabelframe",
+        background=PALETTE["card"],
+        foreground=PALETTE["ink"],
+        relief="solid",
+        borderwidth=1,
+        bordercolor=PALETTE["border"],
+        padding=10,
+    )
+    _safe_configure(
+        style,
+        "Card.TLabelframe.Label",
+        background=PALETTE["card"],
+        foreground=PALETTE["ink"],
+        font=("Georgia", 11, "bold"),
+    )
+
+    # Button
+    _safe_configure(
+        style,
+        "TButton",
+        padding=(12, 7),
+        relief="solid",
+        borderwidth=1,
+        background=PALETTE["card"],
+        foreground=PALETTE["ink"],
+        bordercolor=PALETTE["border"],
+        font=FONT_UI_BOLD,
+    )
+    _safe_map(
+        style,
+        "TButton",
+        background=[("active", PALETTE["paper_2"]), ("pressed", "#e6d8c7"), ("disabled", "#ddd5c9")],
+        foreground=[("disabled", "#9a9188")],
+    )
+
+    _safe_configure(
+        style,
+        "Primary.TButton",
+        padding=(13, 8),
+        relief="solid",
+        borderwidth=1,
+        background=PALETTE["ink"],
+        foreground=PALETTE["card"],
+        bordercolor=PALETTE["border"],
+        font=FONT_UI_BOLD,
+    )
+    _safe_map(style, "Primary.TButton", background=[("active", "#3a3430"), ("pressed", "#11100f")], foreground=[("active", PALETTE["card"])])
+
+    _safe_configure(
+        style,
+        "Secondary.TButton",
+        padding=(12, 7),
+        relief="solid",
+        borderwidth=1,
+        background=PALETTE["card"],
+        foreground=PALETTE["ink"],
+        bordercolor=PALETTE["border"],
+        font=FONT_UI_BOLD,
+    )
+    _safe_map(style, "Secondary.TButton", background=[("active", "#efe4d3"), ("pressed", "#e4d5c1")])
+
+    _safe_configure(
+        style,
+        "Sidebar.TButton",
+        padding=(14, 10),
+        relief="flat",
+        borderwidth=0,
+        background=PALETTE["green"],
+        foreground=PALETTE["card"],
+        font=("Microsoft YaHei UI", 10, "bold"),
+    )
+    _safe_map(style, "Sidebar.TButton", background=[("active", "#f8f1e4"), ("pressed", "#f8f1e4")], foreground=[("active", PALETTE["green_dark"])])
+
+    _safe_configure(style, "Success.TButton", background=PALETTE["green"], foreground=PALETTE["card"], bordercolor=PALETTE["border"], padding=(12, 7), relief="solid")
+    _safe_configure(style, "Warning.TButton", background=PALETTE["gold"], foreground=PALETTE["ink"], bordercolor=PALETTE["border"], padding=(12, 7), relief="solid")
+    _safe_configure(style, "Danger.TButton", background=PALETTE["red"], foreground=PALETTE["card"], bordercolor=PALETTE["border"], padding=(12, 7), relief="solid")
+
+    # Entry / Combobox / Spinbox
+    for stylename in ("TEntry", "TSpinbox"):
+        _safe_configure(
+            style,
+            stylename,
+            fieldbackground=PALETTE["card"],
+            background=PALETTE["card"],
+            foreground=PALETTE["ink"],
+            bordercolor=PALETTE["border"],
+            lightcolor=PALETTE["card"],
+            darkcolor=PALETTE["border"],
+            insertcolor=PALETTE["ink"],
+            padding=5,
+            relief="solid",
+            borderwidth=1,
+        )
+
+    _safe_configure(
+        style,
+        "TCombobox",
+        fieldbackground=PALETTE["card"],
+        background=PALETTE["card"],
+        foreground=PALETTE["ink"],
+        bordercolor=PALETTE["border"],
+        arrowcolor=PALETTE["ink"],
+        padding=5,
+        relief="solid",
+        borderwidth=1,
+    )
+    _safe_map(style, "TCombobox", fieldbackground=[("readonly", PALETTE["card"])], background=[("active", PALETTE["paper_2"])])
+
+    # Notebook
+    _safe_configure(style, "TNotebook", background=PALETTE["paper"], borderwidth=0, tabmargins=(0, 0, 0, 0))
+    _safe_configure(
+        style,
+        "TNotebook.Tab",
+        padding=(14, 9),
+        background=PALETTE["paper_2"],
+        foreground=PALETTE["ink"],
+        borderwidth=1,
+        font=FONT_UI_BOLD,
+    )
+    _safe_map(
+        style,
+        "TNotebook.Tab",
+        background=[("selected", PALETTE["card"]), ("active", "#eadfcc")],
+        foreground=[("selected", PALETTE["ink"])],
+    )
+
+    # Scrollbar
+    _safe_configure(style, "Vertical.TScrollbar", background=PALETTE["paper_2"], troughcolor=PALETTE["card"], arrowcolor=PALETTE["ink"], bordercolor=PALETTE["border"])
+    _safe_configure(style, "Horizontal.TScrollbar", background=PALETTE["paper_2"], troughcolor=PALETTE["card"], arrowcolor=PALETTE["ink"], bordercolor=PALETTE["border"])
+
+    # Check / Radio
+    _safe_configure(style, "TCheckbutton", background=PALETTE["paper"], foreground=PALETTE["ink"], font=FONT_UI)
+    _safe_configure(style, "TRadiobutton", background=PALETTE["paper"], foreground=PALETTE["ink"], font=FONT_UI)
+
+    # Tk 原生组件默认项
+    try:
+        root.option_add("*Text.Background", PALETTE["card"])
+        root.option_add("*Text.Foreground", PALETTE["ink"])
+        root.option_add("*Text.InsertBackground", PALETTE["ink"])
+        root.option_add("*Text.SelectBackground", PALETTE["green_light"])
+        root.option_add("*Text.SelectForeground", PALETTE["ink"])
+        root.option_add("*Text.Font", FONT_MONO)
+
+        root.option_add("*Listbox.Background", PALETTE["card"])
+        root.option_add("*Listbox.Foreground", PALETTE["ink"])
+        root.option_add("*Listbox.SelectBackground", PALETTE["green"])
+        root.option_add("*Listbox.SelectForeground", PALETTE["card"])
+        root.option_add("*Listbox.Font", FONT_UI)
+
+        root.option_add("*Entry.Background", PALETTE["card"])
+        root.option_add("*Entry.Foreground", PALETTE["ink"])
+        root.option_add("*Entry.InsertBackground", PALETTE["ink"])
+    except Exception:
+        pass
+
+
+def style_text_widget(widget: tk.Text | tk.Widget) -> None:
+    """给 Text / ScrolledText 手动应用账本风格。"""
+    try:
+        widget.configure(
+            background=PALETTE["card"],
+            foreground=PALETTE["ink"],
+            insertbackground=PALETTE["ink"],
+            selectbackground=PALETTE["green_light"],
+            selectforeground=PALETTE["ink"],
+            relief=tk.SOLID,
+            borderwidth=1,
+            highlightthickness=1,
+            highlightbackground=PALETTE["border"],
+            highlightcolor=PALETTE["green"],
+            font=FONT_MONO,
+            padx=10,
+            pady=8,
+        )
+    except Exception:
+        pass
+
+
+def style_canvas(canvas: tk.Canvas) -> None:
+    """给 Canvas 背景应用纸张色。"""
+    try:
+        canvas.configure(
+            background=PALETTE["paper"],
+            highlightthickness=0,
+            borderwidth=0,
+        )
+    except Exception:
+        pass

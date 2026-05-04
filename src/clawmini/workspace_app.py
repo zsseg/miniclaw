@@ -26,7 +26,7 @@ from clawmini.core.agent import ClawminiAgent
 from clawmini.storage.history_store import HistoryStore
 from clawmini.tools.qq_auto_reply import QQAutoReplyTool
 from clawmini.types import Message, ToolCall
-from clawmini.ui_theme import apply_theme
+from clawmini.ui_theme import apply_theme, style_text_widget, style_canvas
 from clawmini.adapters.qq_adapter import discover_napcat_http_config
 
 
@@ -357,162 +357,541 @@ class QQAutoReplyPanel:
         self.qq_waited_sec_var = tk.IntVar(value=0)
         self.qq_text_var = tk.StringVar(value="你好，请帮我回复")
 
+        if not hasattr(self, "search_var"):
+            self.search_var = tk.BooleanVar(value=False)
         self._build_ui()
         self._wire_state_persistence()
         self._restore_from_tool_status()
         self._load_state()
 
     def _build_ui(self) -> None:
-        # root_frame: 左(会话区) + 右(配置区) — 右宽左窄，自适应
-        self.root_frame.grid_columnconfigure(0, weight=2, minsize=280)
-        self.root_frame.grid_columnconfigure(1, weight=3, minsize=360)
-        self.root_frame.grid_rowconfigure(0, weight=1)
+        """紧凑 LoveLedger 风格 QQ 自动回复控制台 v4：摘要卡 + 正确分组。"""
+        for child in self.root_frame.winfo_children():
+            child.destroy()
 
-        # ── 右半部分：配置（可滚动） ──
-        config_frame = ttk.Frame(self.root_frame)
-        config_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 2))
-        config_frame.grid_rowconfigure(0, weight=1)
-        config_frame.grid_columnconfigure(0, weight=1)
-        config_canvas = tk.Canvas(config_frame, highlightthickness=0)
-        config_scroll = ttk.Scrollbar(config_frame, orient=tk.VERTICAL, command=config_canvas.yview)
-        body = ttk.Frame(config_canvas)
-        body_window = config_canvas.create_window((0, 0), window=body, anchor="nw")
+        try:
+            _style_text_widget = style_text_widget  # type: ignore[name-defined]
+        except Exception:
+            _style_text_widget = lambda widget: None
 
-        def _sync_config_scroll(_event: tk.Event[Any] = None) -> None:
-            config_canvas.configure(scrollregion=config_canvas.bbox("all"))
+        self.root_frame.configure(style="Paper.TFrame")
+        self.root_frame.grid_columnconfigure(0, weight=1)
+        self.root_frame.grid_rowconfigure(2, weight=1)
+        self.root_frame.grid_rowconfigure(3, weight=0)
 
-        def _sync_config_width(event: tk.Event[Any]) -> None:
-            config_canvas.itemconfig(body_window, width=event.width)
+        # Header：标题 + 全局操作
+        header = ttk.Frame(self.root_frame, style="Paper.TFrame")
+        header.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
+        header.grid_columnconfigure(0, weight=1)
 
-        body.bind("<Configure>", _sync_config_scroll)
-        config_canvas.bind("<Configure>", _sync_config_width)
-        config_canvas.configure(yscrollcommand=config_scroll.set)
-        config_canvas.grid(row=0, column=0, sticky="nsew")
-        config_scroll.grid(row=0, column=1, sticky="ns")
-        # 鼠标滚轮支持
-        def _on_cfg_mousewheel(event: tk.Event[Any]) -> None:
-            config_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        config_canvas.bind("<Enter>", lambda e: config_canvas.bind_all("<MouseWheel>", _on_cfg_mousewheel, add="+"))
-        config_canvas.bind("<Leave>", lambda e: config_canvas.unbind_all("<MouseWheel>"))
-
-        ttk.Label(body, text="QQ自动回复（独立页）", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor=tk.W)
-
-        guide = ttk.LabelFrame(body, text="操作指引", padding=8)
-        guide.pack(fill=tk.X, pady=(8, 6))
+        title_box = ttk.Frame(header, style="Paper.TFrame")
+        title_box.grid(row=0, column=0, sticky="w")
+        ttk.Label(title_box, text="QQ Bot Overview", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        # Restored operation guide
         guide_text = (
-            "1. 先选网关：测试选 mock，正式用 managed。\n"
-            "2. 下载安装 NapCat：点下方「下载NapCat」按钮从官网获取。\n"
-            "3. 安装后点「一键启动/填充」，自动识别账号和地址。\n"
-            "4. 再点「更新配置」保存群号、延时等设置。\n"
-            "5. 先用「模拟收到消息」测试回复效果，再切换到真实 QQ。\n"
-            "6. 如果提示缺少 pywinauto，在终端执行：python -m pip install pywinauto"
+            "操作指引：先选网关（测试 mock / 正式 managed） → 下载 NapCat → 一键启动/填充 → 更新配置 → 模拟测试。"
+            " 缺少 pywinauto 时执行：python -m pip install pywinauto"
         )
-        ttk.Label(guide, text=guide_text, justify=tk.LEFT, foreground="#444").pack(anchor=tk.W)
+        ttk.Label(
+            title_box,
+            text=guide_text,
+            justify=tk.LEFT,
+            style="Muted.TLabel",
+            wraplength=820,
+        ).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        action_shell = tk.Frame(
+            header,
+            bg="#fff8e8",
+            highlightbackground="#2a2521",
+            highlightthickness=1,
+            bd=0,
+        )
+        action_shell.grid(row=0, column=1, sticky="e")
 
-        api_box = ttk.LabelFrame(body, text="文本 API（QQ 独立配置）", padding=8)
-        api_box.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(api_box, text="Provider:").grid(row=0, column=0, sticky=tk.W)
-        ttk.Combobox(api_box, textvariable=self.text_api_provider_var, values=["openai", "deepseek", "qwen", "mock"], width=10, state="readonly").grid(row=0, column=1, sticky=tk.W, padx=4)
-        ttk.Label(api_box, text="Model:").grid(row=0, column=2, sticky=tk.W, padx=(8, 0))
-        ttk.Entry(api_box, textvariable=self.text_api_model_var, width=16).grid(row=0, column=3, sticky=tk.W, padx=4)
-        ttk.Label(api_box, text="API Key:").grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
-        ttk.Entry(api_box, textvariable=self.text_api_key_var, width=22).grid(row=1, column=1, sticky=tk.W, padx=4, pady=(4, 0))
-        ttk.Label(api_box, text="Base URL:").grid(row=1, column=2, sticky=tk.W, pady=(4, 0), padx=(8, 0))
-        ttk.Entry(api_box, textvariable=self.text_api_base_url_var, width=28).grid(row=1, column=3, sticky=tk.W, padx=4, pady=(4, 0))
-        self.search_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(api_box, text="联网搜索 🔍（DeepSeek/Qwen 可用）", variable=self.search_var).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(6, 0))
+        ttk.Button(
+            action_shell,
+            text="⚡ 启动",
+            command=self.on_qq_bootstrap,
+            style="TopPrimary.TButton",
+            width=10,
+        ).grid(row=0, column=0, padx=(8, 6), pady=7)
 
-        cfg = ttk.Frame(body)
-        cfg.pack(fill=tk.X, pady=(8, 6))
-        ttk.Label(cfg, text="基础配置", font=("Microsoft YaHei UI", 10, "bold")).grid(row=0, column=0, columnspan=6, sticky=tk.W, pady=(0, 6))
-        ttk.Label(cfg, text="目标群号(可多个，逗号分隔):").grid(row=1, column=0, sticky=tk.W)
-        ttk.Entry(cfg, textvariable=self.qq_group_var, width=24).grid(row=1, column=1, padx=6)
-        ttk.Label(cfg, text="私聊延时(秒):").grid(row=1, column=2, sticky=tk.W)
-        ttk.Entry(cfg, textvariable=self.qq_delay_var, width=10).grid(row=1, column=3, padx=6)
-        ttk.Label(cfg, text="冷却(秒):").grid(row=1, column=4, sticky=tk.W)
-        ttk.Entry(cfg, textvariable=self.qq_cooldown_var, width=8).grid(row=1, column=5, padx=6)
+        ttk.Button(
+            action_shell,
+            text="📝 保存全部",
+            command=self.on_qq_configure,
+            style="TopSecondary.TButton",
+            width=12,
+        ).grid(row=0, column=1, padx=6, pady=7)
 
-        ttk.Label(cfg, text="当前账号ID:").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(cfg, textvariable=self.qq_self_user_var, width=12).grid(row=2, column=1, padx=6, pady=(8, 0))
-        ttk.Checkbutton(cfg, text="启用私聊回复", variable=self.qq_private_enabled_var).grid(row=2, column=2, sticky=tk.W, pady=(8, 0), padx=(4,0))
-        ttk.Checkbutton(cfg, text="启用自动回复", variable=self.qq_enabled_var).grid(row=2, column=3, sticky=tk.W, pady=(8, 0), padx=(4,0))
-        ttk.Label(cfg, text="网关:").grid(row=2, column=4, sticky=tk.W, pady=(8, 0), padx=(8,0))
-        ttk.Combobox(cfg, textvariable=self.qq_gateway_var, values=["mock", "managed", "windows"], width=8, state="readonly").grid(row=2, column=5, padx=4, pady=(8, 0))
+        ttk.Button(
+            action_shell,
+            text="◉ 状态",
+            command=self.on_qq_status,
+            style="TopGhost.TButton",
+            width=10,
+        ).grid(row=0, column=2, padx=(6, 8), pady=7)
 
-        ttk.Checkbutton(cfg, text="连接后立即尝试发送", variable=self.qq_connect_now_var).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
+        # 摘要卡：默认展示，点击编辑才展开
+        cards = ttk.Frame(self.root_frame, style="Paper.TFrame")
+        cards.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 10))
+        for i in range(4):
+            cards.grid_columnconfigure(i, weight=1, uniform="summary_card")
 
-        ttk.Label(cfg, text="群号管理:").grid(row=4, column=0, sticky=tk.W, pady=(6, 0))
-        ttk.Entry(cfg, textvariable=self.qq_group_edit_var, width=12).grid(row=4, column=1, padx=4, pady=(6, 0), sticky=tk.W)
-        ttk.Button(cfg, text="新增", command=self.on_qq_group_add).grid(row=4, column=2, sticky=tk.W, pady=(6, 0))
-        ttk.Button(cfg, text="删除", command=self.on_qq_group_remove).grid(row=4, column=3, sticky=tk.W, pady=(6, 0), padx=(4,0))
-        ttk.Label(cfg, text="新群号:").grid(row=5, column=0, sticky=tk.W, pady=(6, 0))
-        ttk.Entry(cfg, textvariable=self.qq_group_new_var, width=12).grid(row=5, column=1, padx=4, pady=(6, 0), sticky=tk.W)
-        ttk.Button(cfg, text="修改", command=self.on_qq_group_update).grid(row=5, column=2, sticky=tk.W, pady=(6, 0))
+        summary_labels: list[tuple[tk.Label, tk.Label, callable, callable]] = []
 
-        ttk.Label(cfg, text="自定义提示词:").grid(row=6, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(cfg, textvariable=self.qq_prompt_var, width=36).grid(row=6, column=1, columnspan=5, sticky=tk.W, pady=(8, 0))
+        def _safe_get(var, default: str = "") -> str:
+            try:
+                return str(var.get())
+            except Exception:
+                return default
 
-        managed_row = ttk.LabelFrame(body, text="managed / NapCat 在线发送", padding=8)
-        managed_row.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(managed_row, text="API 基址:").grid(row=0, column=0, sticky=tk.W)
-        ttk.Entry(managed_row, textvariable=self.qq_managed_api_base_var, width=42).grid(row=0, column=1, columnspan=3, sticky=tk.W, padx=6)
-        ttk.Label(managed_row, text="发送Token(必填):").grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
-        ttk.Entry(managed_row, textvariable=self.qq_managed_token_var, width=22).grid(row=1, column=1, sticky=tk.W, padx=4, pady=(4, 0))
-        ttk.Label(managed_row, text="接收Token(可选):").grid(row=1, column=2, sticky=tk.W, pady=(4, 0), padx=(8, 0))
-        ttk.Entry(managed_row, textvariable=self.qq_receive_token_var, width=22).grid(row=1, column=3, sticky=tk.W, padx=4, pady=(4, 0))
-        ttk.Label(managed_row, text="账号ID:").grid(row=2, column=0, sticky=tk.W, pady=(4, 0))
-        ttk.Entry(managed_row, textvariable=self.qq_managed_account_var, width=14).grid(row=2, column=1, sticky=tk.W, padx=4, pady=(4, 0))
-        ttk.Label(managed_row, text="💡 发送Token→发消息用；接收Token→验证事件。一键启动可自动识别。", foreground="#666").grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(4, 0))
+        def _parse_groups() -> list[str]:
+            raw = str(self.qq_group_var.get() or "").strip()
+            if not raw:
+                return []
+            for sep in [",", "，", ";", "；", "\n", "\t"]:
+                raw = raw.replace(sep, " ")
+            return [p.strip() for p in raw.split(" ") if p.strip()]
 
-        actions = ttk.Frame(body)
-        actions.pack(fill=tk.X, pady=6)
-        ttk.Label(actions, text="快捷操作:", foreground="#444").grid(row=0, column=0, sticky=tk.W, padx=(0, 4), pady=(0, 4))
-        ttk.Button(actions, text="下载NapCat", command=self.on_qq_download_napcat).grid(row=0, column=1, sticky=tk.W, padx=(0, 4), pady=(0, 4))
-        ttk.Button(actions, text="一键启动/填充", command=self.on_qq_bootstrap).grid(row=0, column=2, sticky=tk.W, padx=(0, 4), pady=(0, 4))
-        ttk.Button(actions, text="更新配置", command=self.on_qq_configure).grid(row=0, column=3, sticky=tk.W, padx=(0, 4), pady=(0, 4))
-        ttk.Button(actions, text="一键绑定客户端", command=self.on_qq_bind_local_client_auto).grid(row=1, column=0, sticky=tk.W, padx=(0, 4))
-        ttk.Button(actions, text="查询状态", command=self.on_qq_status).grid(row=1, column=1, sticky=tk.W, padx=(0, 4))
-        ttk.Button(actions, text="轮询待回复", command=self.on_qq_poll_pending).grid(row=1, column=2, sticky=tk.W, padx=(0, 4))
-        ttk.Button(actions, text="暂停", command=self.on_qq_pause).grid(row=1, column=3, sticky=tk.W, padx=(0, 4))
-        ttk.Button(actions, text="恢复", command=self.on_qq_resume).grid(row=2, column=0, sticky=tk.W, padx=(0, 4), pady=(4, 0))
-        ttk.Button(actions, text="重启事件服务器", command=self.on_qq_restart_webhook).grid(row=2, column=1, sticky=tk.W, padx=(0, 4), pady=(4, 0))
+        def _group_value() -> str:
+            groups = _parse_groups()
+            if not groups:
+                return "未设置目标群"
+            if len(groups) == 1:
+                return groups[0]
+            return f"共 {len(groups)} 个群"
 
-        simulate = ttk.LabelFrame(body, text="消息模拟", padding=8)
-        simulate.pack(fill=tk.X, pady=8)
-        ttk.Label(simulate, text="先模拟测试，确认回复正常后再切换到真实 QQ。", foreground="#666").grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 4))
-        ttk.Label(simulate, text="消息来源:").grid(row=1, column=0, sticky=tk.W)
-        ttk.Combobox(simulate, textvariable=self.qq_source_var, values=["private", "group"], width=8, state="readonly").grid(row=1, column=1, sticky=tk.W)
-        ttk.Label(simulate, text="会话ID:").grid(row=1, column=2, sticky=tk.W, padx=(8, 0))
-        ttk.Entry(simulate, textvariable=self.qq_chat_var, width=20).grid(row=1, column=3, padx=4)
-        ttk.Button(simulate, text="模拟收到消息", command=self.on_qq_simulate_message).grid(row=1, column=4, rowspan=3, padx=(8, 4), sticky=tk.NS)
-        ttk.Button(simulate, text="模拟用户手动回复(取消)", command=self.on_qq_manual_replied).grid(row=1, column=5, rowspan=3, padx=4, sticky=tk.NS)
-        ttk.Label(simulate, text="发送者ID:").grid(row=2, column=0, sticky=tk.W, pady=(4, 0))
-        ttk.Entry(simulate, textvariable=self.qq_sender_var, width=14).grid(row=2, column=1, padx=4, pady=(4, 0))
-        ttk.Label(simulate, text="已等待(秒):").grid(row=2, column=2, sticky=tk.W, pady=(4, 0), padx=(8, 0))
-        ttk.Entry(simulate, textvariable=self.qq_waited_sec_var, width=6).grid(row=2, column=3, padx=4, pady=(4, 0), sticky=tk.W)
-        ttk.Label(simulate, text="消息内容:").grid(row=3, column=0, sticky=tk.W, pady=(6, 0))
-        ttk.Entry(simulate, textvariable=self.qq_text_var, width=28).grid(row=3, column=1, columnspan=3, pady=(6, 0), sticky=tk.W)
+        def _group_detail() -> str:
+            groups = _parse_groups()
+            if not groups:
+                return "在下方「群组 & 基础」中填写目标群。"
+            preview = " / ".join(groups[:4])
+            if len(groups) > 4:
+                preview += " / ..."
+            return preview
 
-        info = ttk.LabelFrame(body, text="运行信息", padding=8)
-        info.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(info, textvariable=self.qq_status_text, foreground="#444").pack(anchor=tk.W)
-        ttk.Label(info, textvariable=self.qq_webhook_url_var, foreground="#666").pack(anchor=tk.W, pady=(4, 0))
+        def _refresh_cards() -> None:
+            for value_label, detail_label, value_fn, detail_fn in summary_labels:
+                try:
+                    value_label.configure(text=value_fn())
+                    detail_label.configure(text=detail_fn())
+                except Exception:
+                    pass
 
-        # ── 左半部分：会话记录（占据左侧部分空间） ──
-        chat_box = ttk.LabelFrame(self.root_frame, text="会话记录（消息与回复）", padding=8)
-        chat_box.grid(row=0, column=0, sticky="nsew", padx=(2, 4))
-        chat_box.grid_rowconfigure(0, weight=1)
-        chat_box.grid_columnconfigure(0, weight=1)
-        self.qq_chat_display = tk.Text(chat_box, wrap=tk.WORD, state=tk.DISABLED,
-                                        font=("Microsoft YaHei UI", 9))
+        def _save_and_refresh() -> None:
+            self.on_qq_configure()
+            _refresh_cards()
+
+        def _build_summary_card(parent, col, title, tag, accent, value_fn, detail_fn, editor_builder):
+            card = tk.Frame(parent, bg="#fff8e8", highlightbackground="#2a2521", highlightthickness=1)
+            card.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 10, 0))
+            card.grid_columnconfigure(0, weight=1)
+
+            head = tk.Frame(card, bg="#fff8e8")
+            head.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 2))
+            head.grid_columnconfigure(0, weight=1)
+
+            tk.Label(
+                head,
+                text=title,
+                bg="#fff8e8",
+                fg="#26211f",
+                font=("Georgia", 10, "bold"),
+                anchor="w",
+            ).grid(row=0, column=0, sticky="ew")
+
+            tk.Label(
+                head,
+                text=tag,
+                bg=accent,
+                fg="#fff8e8",
+                font=("Georgia", 6, "bold"),
+                padx=7,
+                pady=2,
+            ).grid(row=0, column=1, sticky="e")
+
+            value_label = tk.Label(
+                card,
+                text=value_fn(),
+                bg="#fff8e8",
+                fg="#26211f",
+                font=("Georgia", 15, "bold"),
+                anchor="w",
+            )
+            value_label.grid(row=1, column=0, sticky="ew", padx=12, pady=(2, 0))
+
+            detail_label = tk.Label(
+                card,
+                text=detail_fn(),
+                bg="#fff8e8",
+                fg="#756c61",
+                font=("Microsoft YaHei UI", 8),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=260,
+            )
+            detail_label.grid(row=2, column=0, sticky="ew", padx=12, pady=(2, 8))
+
+            controls = tk.Frame(card, bg="#fff8e8")
+            controls.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
+            controls.grid_columnconfigure(0, weight=1)
+
+            edit_holder = tk.Frame(card, bg="#fff8e8")
+            edit_holder.grid_columnconfigure(0, weight=1)
+
+            expanded = {"value": False}
+
+            def _collapse() -> None:
+                expanded["value"] = False
+                for child in edit_holder.winfo_children():
+                    child.destroy()
+                edit_holder.grid_remove()
+                edit_btn.configure(text="编辑")
+
+            def _toggle() -> None:
+                if expanded["value"]:
+                    _collapse()
+                    return
+                expanded["value"] = True
+                edit_holder.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 12))
+                for child in edit_holder.winfo_children():
+                    child.destroy()
+                editor_builder(edit_holder, _save_and_refresh, _collapse)
+                edit_btn.configure(text="收起")
+
+            edit_btn = ttk.Button(controls, text="编辑", command=_toggle, style="MiniOutline.TButton")
+            edit_btn.grid(row=0, column=0, sticky="e")
+
+            summary_labels.append((value_label, detail_label, value_fn, detail_fn))
+            return card
+
+        def _editor_actions(parent, save_cmd, collapse_cmd, row: int = 99):
+            actions = ttk.Frame(parent, style="Surface.TFrame")
+            actions.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+            actions.grid_columnconfigure(0, weight=1)
+            ttk.Button(actions, text="保存", command=lambda: (save_cmd(), collapse_cmd()), style="Mini.TButton").grid(row=0, column=1, padx=(0, 6))
+            ttk.Button(actions, text="取消", command=collapse_cmd, style="MiniOutline.TButton").grid(row=0, column=2)
+
+        def _auto_editor(parent, save_cmd, collapse_cmd):
+            parent.grid_columnconfigure(1, weight=1)
+            ttk.Checkbutton(parent, text="启用自动回复", variable=self.qq_enabled_var).grid(row=0, column=0, sticky="w")
+            ttk.Checkbutton(parent, text="启用私聊", variable=self.qq_private_enabled_var).grid(row=0, column=1, sticky="w")
+            ttk.Checkbutton(parent, text="图片识别", variable=self.qq_image_recognition_var).grid(row=0, column=2, sticky="w")
+            ttk.Label(parent, text="私聊延时").grid(row=1, column=0, sticky="w", pady=(6, 0))
+            ttk.Entry(parent, textvariable=self.qq_delay_var, width=8).grid(row=1, column=1, sticky="ew", padx=(6, 8), pady=(6, 0))
+            ttk.Label(parent, text="冷却秒数").grid(row=2, column=0, sticky="w", pady=(6, 0))
+            ttk.Entry(parent, textvariable=self.qq_cooldown_var, width=8).grid(row=2, column=1, sticky="ew", padx=(6, 8), pady=(6, 0))
+            _editor_actions(parent, save_cmd, collapse_cmd, row=3)
+
+        def _model_editor(parent, save_cmd, collapse_cmd):
+            parent.grid_columnconfigure(1, weight=1)
+            ttk.Label(parent, text="Provider").grid(row=0, column=0, sticky="w")
+            ttk.Combobox(
+                parent,
+                textvariable=self.text_api_provider_var,
+                values=["openai", "deepseek", "qwen", "mock"],
+                state="readonly",
+                width=12,
+            ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+            ttk.Label(parent, text="Model").grid(row=1, column=0, sticky="w", pady=(6, 0))
+            ttk.Entry(parent, textvariable=self.text_api_model_var).grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+            _editor_actions(parent, save_cmd, collapse_cmd, row=2)
+
+        def _gateway_editor(parent, save_cmd, collapse_cmd):
+            parent.grid_columnconfigure(1, weight=1)
+            ttk.Label(parent, text="网关").grid(row=0, column=0, sticky="w")
+            ttk.Combobox(
+                parent,
+                textvariable=self.qq_gateway_var,
+                values=["mock", "managed", "windows"],
+                state="readonly",
+                width=12,
+            ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+            ttk.Label(parent, text="API 基址").grid(row=1, column=0, sticky="w", pady=(6, 0))
+            ttk.Entry(parent, textvariable=self.qq_managed_api_base_var).grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+            ttk.Label(parent, text="托管账号").grid(row=2, column=0, sticky="w", pady=(6, 0))
+            ttk.Entry(parent, textvariable=self.qq_managed_account_var).grid(row=2, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+            _editor_actions(parent, save_cmd, collapse_cmd, row=3)
+
+        def _groups_editor(parent, save_cmd, collapse_cmd):
+            parent.grid_columnconfigure(1, weight=1)
+            ttk.Label(parent, text="目标群号").grid(row=0, column=0, sticky="w")
+            ttk.Entry(parent, textvariable=self.qq_group_var).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+            ttk.Label(parent, text="机器人 ID").grid(row=1, column=0, sticky="w", pady=(6, 0))
+            ttk.Entry(parent, textvariable=self.qq_self_user_var).grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+            ttk.Label(parent, text="多个群可用逗号/空格分隔", style="Muted.TLabel").grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+            _editor_actions(parent, save_cmd, collapse_cmd, row=3)
+
+        _build_summary_card(
+            cards,
+            0,
+            "Auto Reply",
+            "AUTO",
+            "#285d52",
+            lambda: "已启用" if self.qq_enabled_var.get() else "已关闭",
+            lambda: f"私聊 {'开' if self.qq_private_enabled_var.get() else '关'} · 识图 {'开' if self.qq_image_recognition_var.get() else '关'} · 延时 {_safe_get(self.qq_delay_var, '0')}s · 冷却 {_safe_get(self.qq_cooldown_var, '0')}s",
+            _auto_editor,
+        )
+
+        _build_summary_card(
+            cards,
+            1,
+            "Model",
+            "AI",
+            "#747a91",
+            lambda: _safe_get(self.text_api_model_var, "mock") or "mock",
+            lambda: f"Provider: {_safe_get(self.text_api_provider_var, 'mock')}",
+            _model_editor,
+        )
+
+        _build_summary_card(
+            cards,
+            2,
+            "Gateway",
+            "NET",
+            "#285d52",
+            lambda: _safe_get(self.qq_gateway_var, "managed") or "managed",
+            lambda: f"{_safe_get(self.qq_managed_api_base_var, '未设置')} · Account {_safe_get(self.qq_managed_account_var, '-')}",
+            _gateway_editor,
+        )
+
+        _build_summary_card(
+            cards,
+            3,
+            "Target Groups",
+            "CHAT",
+            "#b85757",
+            _group_value,
+            _group_detail,
+            _groups_editor,
+        )
+
+        # 变量变化时刷新摘要
+        for var in (
+            self.qq_enabled_var,
+            self.qq_private_enabled_var,
+            self.qq_image_recognition_var,
+            self.qq_delay_var,
+            self.qq_cooldown_var,
+            self.text_api_provider_var,
+            self.text_api_model_var,
+            self.qq_gateway_var,
+            self.qq_managed_api_base_var,
+            self.qq_managed_account_var,
+            self.qq_group_var,
+            self.qq_self_user_var,
+        ):
+            try:
+                var.trace_add("write", lambda *_: _refresh_cards())
+            except Exception:
+                pass
+
+        # 中部：日志 + 快捷状态
+        main = ttk.Frame(self.root_frame, style="Paper.TFrame")
+        main.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 10))
+        main.grid_columnconfigure(0, weight=5)
+        main.grid_columnconfigure(1, weight=2, minsize=270)
+        main.grid_rowconfigure(0, weight=1)
+
+        log_card = ttk.LabelFrame(main, text="Live Ledger · QQ Events", padding=10, style="Card.TLabelframe")
+        log_card.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        log_card.grid_columnconfigure(0, weight=1)
+        log_card.grid_rowconfigure(0, weight=1)
+
+        self.qq_chat_display = tk.Text(log_card, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 10))
         self.qq_chat_display.grid(row=0, column=0, sticky="nsew")
-        chat_scroll = ttk.Scrollbar(chat_box, orient=tk.VERTICAL, command=self.qq_chat_display.yview)
-        chat_scroll.grid(row=0, column=1, sticky="ns")
-        self.qq_chat_display.configure(yscrollcommand=chat_scroll.set)
-        # 配置会话记录颜色标签
-        self.qq_chat_display.tag_configure("msg_in", foreground="#1a73e8", font=("Microsoft YaHei UI", 9, "bold"))
-        self.qq_chat_display.tag_configure("msg_out", foreground="#0d904f", font=("Microsoft YaHei UI", 9, "bold"))
-        self.qq_chat_display.tag_configure("msg_sys", foreground="#888888", font=("Microsoft YaHei UI", 9))
+        _style_text_widget(self.qq_chat_display)
+
+        scroll = ttk.Scrollbar(log_card, orient=tk.VERTICAL, command=self.qq_chat_display.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.qq_chat_display.configure(yscrollcommand=scroll.set)
+
+        self.qq_chat_display.tag_configure("msg_in", foreground="#285d52", font=("Microsoft YaHei UI", 10, "bold"))
+        self.qq_chat_display.tag_configure("msg_out", foreground="#b85757", font=("Microsoft YaHei UI", 10, "bold"))
+        self.qq_chat_display.tag_configure("msg_sys", foreground="#7b7167", font=("Microsoft YaHei UI", 9))
+
+        right = ttk.Frame(main, style="Paper.TFrame")
+        right.grid(row=0, column=1, sticky="nsew")
+        right.grid_columnconfigure(0, weight=1)
+
+        status_card = tk.Frame(
+            right,
+            bg="#fff8e8",
+            highlightbackground="#2a2521",
+            highlightthickness=1,
+        )
+        status_card.grid(row=0, column=0, sticky="ew")
+        status_card.grid_columnconfigure(0, weight=1)
+
+        status_head = tk.Frame(status_card, bg="#fff8e8")
+        status_head.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        status_head.grid_columnconfigure(0, weight=1)
+
+        tk.Label(
+            status_head,
+            text="Recent Status",
+            bg="#fff8e8",
+            fg="#26211f",
+            font=("Georgia", 10, "bold"),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+
+        tk.Label(
+            status_head,
+            text="LIVE",
+            bg="#285d52",
+            fg="#fff8e8",
+            font=("Georgia", 6, "bold"),
+            padx=7,
+            pady=2,
+        ).grid(row=0, column=1, sticky="e")
+
+        tk.Label(
+            status_card,
+            textvariable=self.qq_status_text,
+            bg="#fff8e8",
+            fg="#26211f",
+            font=("Microsoft YaHei UI", 9),
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=260,
+        ).grid(row=1, column=0, sticky="ew", padx=12, pady=(2, 8))
+
+        tk.Label(
+            status_card,
+            text="Webhook",
+            bg="#fff8e8",
+            fg="#756c61",
+            font=("Georgia", 8, "bold"),
+            anchor="w",
+        ).grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 2))
+
+        webhook_entry = ttk.Entry(
+            status_card,
+            textvariable=self.qq_webhook_url_var,
+            state="readonly",
+        )
+        webhook_entry.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
+        action_card = ttk.LabelFrame(right, text="Quick Actions", padding=10, style="Card.TLabelframe")
+        action_card.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        for i in range(2):
+            action_card.grid_columnconfigure(i, weight=1)
+        ttk.Button(action_card, text="下载 NapCat", command=self.on_qq_download_napcat, style="Secondary.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=4)
+        ttk.Button(action_card, text="绑定客户端", command=self.on_qq_bind_local_client_auto, style="Secondary.TButton").grid(row=0, column=1, sticky="ew", pady=4)
+        ttk.Button(action_card, text="轮询待回复", command=self.on_qq_poll_pending, style="Secondary.TButton").grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=4)
+        ttk.Button(action_card, text="暂停", command=self.on_qq_pause, style="Warning.TButton").grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Button(action_card, text="恢复", command=self.on_qq_resume, style="Success.TButton").grid(row=2, column=0, sticky="ew", padx=(0, 6), pady=4)
+        ttk.Button(action_card, text="重启事件服务器", command=self.on_qq_restart_webhook, style="Danger.TButton").grid(row=2, column=1, sticky="ew", pady=4)
+
+        # 底部：完整参数分组
+        settings = ttk.LabelFrame(self.root_frame, text="Ledger Settings · 完整参数", padding=8, style="Card.TLabelframe")
+        settings.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 14))
+        settings.grid_columnconfigure(0, weight=1)
+
+        config_tabs = ttk.Notebook(settings, style="Ledger.TNotebook")
+        config_tabs.grid(row=0, column=0, sticky="ew")
+
+        # Tab 1: 群组 & 基础
+        basic = ttk.Frame(config_tabs, style="Surface.TFrame", padding=10)
+        config_tabs.add(basic, text="  Overview 群组 & 基础  ")
+        for i in range(8):
+            basic.grid_columnconfigure(i, weight=1)
+
+        group_box = ttk.LabelFrame(basic, text="目标群 & 群号管理", padding=8, style="Card.TLabelframe")
+        group_box.grid(row=0, column=0, columnspan=8, sticky="ew", pady=(0, 8))
+        for i in range(8):
+            group_box.grid_columnconfigure(i, weight=1)
+
+        ttk.Label(group_box, text="当前目标群").grid(row=0, column=0, sticky="w")
+        ttk.Entry(group_box, textvariable=self.qq_group_var).grid(row=0, column=1, columnspan=4, sticky="ew", padx=(8, 8))
+        ttk.Label(group_box, text="机器人ID").grid(row=0, column=5, sticky="w")
+        ttk.Entry(group_box, textvariable=self.qq_self_user_var, width=14).grid(row=0, column=6, sticky="ew", padx=(8, 8))
+        ttk.Button(group_box, text="保存全部", command=self.on_qq_configure, style="Primary.TButton").grid(row=0, column=7, sticky="ew")
+
+        ttk.Label(group_box, text="群号管理").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(group_box, textvariable=self.qq_group_edit_var, width=14).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
+        ttk.Button(group_box, text="新增", command=self.on_qq_group_add, style="Secondary.TButton").grid(row=1, column=2, sticky="ew", padx=(0, 8), pady=(8, 0))
+        ttk.Button(group_box, text="删除", command=self.on_qq_group_remove, style="Secondary.TButton").grid(row=1, column=3, sticky="ew", padx=(0, 8), pady=(8, 0))
+        ttk.Label(group_box, text="改为").grid(row=1, column=4, sticky="w", pady=(8, 0))
+        ttk.Entry(group_box, textvariable=self.qq_group_new_var, width=14).grid(row=1, column=5, sticky="ew", padx=(8, 8), pady=(8, 0))
+        ttk.Button(group_box, text="修改", command=self.on_qq_group_update, style="Secondary.TButton").grid(row=1, column=6, sticky="ew", padx=(0, 8), pady=(8, 0))
+        ttk.Button(group_box, text="同步保存", command=self.on_qq_configure, style="Secondary.TButton").grid(row=1, column=7, sticky="ew", pady=(8, 0))
+
+        rule_box = ttk.LabelFrame(basic, text="回复规则", padding=8, style="Card.TLabelframe")
+        rule_box.grid(row=1, column=0, columnspan=8, sticky="ew")
+        for i in range(8):
+            rule_box.grid_columnconfigure(i, weight=1)
+
+        ttk.Label(rule_box, text="私聊延时").grid(row=0, column=0, sticky="w")
+        ttk.Entry(rule_box, textvariable=self.qq_delay_var, width=8).grid(row=0, column=1, sticky="w", padx=(8, 14))
+        ttk.Label(rule_box, text="冷却秒数").grid(row=0, column=2, sticky="w")
+        ttk.Entry(rule_box, textvariable=self.qq_cooldown_var, width=8).grid(row=0, column=3, sticky="w", padx=(8, 14))
+        ttk.Checkbutton(rule_box, text="启用自动回复", variable=self.qq_enabled_var).grid(row=0, column=4, sticky="w")
+        ttk.Checkbutton(rule_box, text="启用私聊回复", variable=self.qq_private_enabled_var).grid(row=0, column=5, sticky="w")
+        ttk.Checkbutton(rule_box, text="图片识别", variable=self.qq_image_recognition_var).grid(row=0, column=6, sticky="w")
+        ttk.Checkbutton(rule_box, text="连接后立即尝试发送", variable=self.qq_connect_now_var).grid(row=0, column=7, sticky="w")
+
+        ttk.Label(rule_box, text="猫娘/人格 Prompt").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(rule_box, textvariable=self.qq_prompt_var).grid(row=1, column=1, columnspan=7, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        # Tab 2: 模型 & 搜索
+        model = ttk.Frame(config_tabs, style="Surface.TFrame", padding=10)
+        config_tabs.add(model, text="  Advisor 模型 & 搜索  ")
+        for i in range(6):
+            model.grid_columnconfigure(i, weight=1)
+
+        ttk.Label(model, text="Provider").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(model, textvariable=self.text_api_provider_var, values=["openai", "deepseek", "qwen", "mock"], width=12, state="readonly").grid(row=0, column=1, sticky="ew", padx=(8, 14))
+        ttk.Label(model, text="Model").grid(row=0, column=2, sticky="w")
+        ttk.Entry(model, textvariable=self.text_api_model_var).grid(row=0, column=3, sticky="ew", padx=(8, 14))
+        ttk.Label(model, text="Base URL").grid(row=0, column=4, sticky="w")
+        ttk.Entry(model, textvariable=self.text_api_base_url_var).grid(row=0, column=5, sticky="ew", padx=(8, 0))
+
+        ttk.Label(model, text="API Key").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(model, textvariable=self.text_api_key_var, show="•").grid(row=1, column=1, columnspan=4, sticky="ew", padx=(8, 8), pady=(8, 0))
+        ttk.Button(model, text="保存全部", command=self.on_qq_configure, style="Primary.TButton").grid(row=1, column=5, sticky="ew", pady=(8, 0))
+        ttk.Checkbutton(model, text="联网搜索（DeepSeek / Qwen 可用）", variable=self.search_var).grid(row=2, column=1, columnspan=5, sticky="w", pady=(8, 0))
+
+        # Tab 3: NapCat 网关
+        napcat = ttk.Frame(config_tabs, style="Surface.TFrame", padding=10)
+        config_tabs.add(napcat, text="  Vault NapCat 网关  ")
+        for i in range(6):
+            napcat.grid_columnconfigure(i, weight=1)
+
+        ttk.Label(napcat, text="网关模式").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(napcat, textvariable=self.qq_gateway_var, values=["mock", "managed", "windows"], width=12, state="readonly").grid(row=0, column=1, sticky="ew", padx=(8, 14))
+        ttk.Label(napcat, text="NapCat API 基址").grid(row=0, column=2, sticky="w")
+        ttk.Entry(napcat, textvariable=self.qq_managed_api_base_var).grid(row=0, column=3, columnspan=2, sticky="ew", padx=(8, 8))
+        ttk.Button(napcat, text="保存全部", command=self.on_qq_configure, style="Primary.TButton").grid(row=0, column=5, sticky="ew")
+
+        ttk.Label(napcat, text="托管账号").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(napcat, textvariable=self.qq_managed_account_var).grid(row=1, column=1, sticky="ew", padx=(8, 14), pady=(8, 0))
+        ttk.Label(napcat, text="发送 Token").grid(row=1, column=2, sticky="w", pady=(8, 0))
+        ttk.Entry(napcat, textvariable=self.qq_managed_token_var, show="•").grid(row=1, column=3, sticky="ew", padx=(8, 14), pady=(8, 0))
+        ttk.Label(napcat, text="接收 Token").grid(row=1, column=4, sticky="w", pady=(8, 0))
+        ttk.Entry(napcat, textvariable=self.qq_receive_token_var, show="•").grid(row=1, column=5, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Label(napcat, textvariable=self.qq_webhook_url_var, style="Muted.TLabel").grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
+
+        # Tab 4: 模拟测试
+        test = ttk.Frame(config_tabs, style="Surface.TFrame", padding=10)
+        config_tabs.add(test, text="  Test 模拟测试  ")
+        for i in range(8):
+            test.grid_columnconfigure(i, weight=1)
+
+        ttk.Label(test, text="消息来源").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(test, textvariable=self.qq_source_var, values=["private", "group"], width=10, state="readonly").grid(row=0, column=1, sticky="ew", padx=(8, 8))
+        ttk.Label(test, text="会话ID").grid(row=0, column=2, sticky="w")
+        ttk.Entry(test, textvariable=self.qq_chat_var).grid(row=0, column=3, sticky="ew", padx=(8, 8))
+        ttk.Label(test, text="发送者ID").grid(row=0, column=4, sticky="w")
+        ttk.Entry(test, textvariable=self.qq_sender_var).grid(row=0, column=5, sticky="ew", padx=(8, 8))
+        ttk.Label(test, text="已等待").grid(row=0, column=6, sticky="w")
+        ttk.Entry(test, textvariable=self.qq_waited_sec_var, width=8).grid(row=0, column=7, sticky="ew", padx=(8, 0))
+
+        ttk.Label(test, text="消息内容").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(test, textvariable=self.qq_text_var).grid(row=1, column=1, columnspan=5, sticky="ew", padx=(8, 8), pady=(8, 0))
+        ttk.Button(test, text="模拟收到消息", command=self.on_qq_simulate_message, style="Primary.TButton").grid(row=1, column=6, sticky="ew", padx=(0, 8), pady=(8, 0))
+        ttk.Button(test, text="模拟手动回复", command=self.on_qq_manual_replied, style="Secondary.TButton").grid(row=1, column=7, sticky="ew", pady=(8, 0))
 
     def _wire_state_persistence(self) -> None:
         tracked_vars = [
@@ -1475,9 +1854,9 @@ class WorkspaceFileApp:
         self.workspace_dir = workspace_dir
         self.manager = WorkspaceSessionManager(workspace_dir)
 
-        self.root.title("Clawmini 工作区会话器")
-        self.root.geometry("1180x760")
-        self.root.minsize(980, 620)
+        self.root.title("Clawmini · 工作区助手")
+        self.root.geometry("1280x820")
+        self.root.minsize(1060, 680)
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
 
@@ -1523,23 +1902,23 @@ class WorkspaceFileApp:
         recycle_page.grid_rowconfigure(0, weight=1)
         recycle_page.grid_columnconfigure(0, weight=1)
 
-        self.home_notebook.add(file_page, text="文件管理")
-        self.home_notebook.add(qq_page, text="QQ自动回复")
-        self.home_notebook.add(recycle_page, text="回收站")
+        self.home_notebook.add(file_page, text="  🗂 文件管理  ")
+        self.home_notebook.add(qq_page, text="  🐾 QQ自动回复  ")
+        self.home_notebook.add(recycle_page, text="  ♻ 回收站  ")
 
         top = ttk.Frame(file_page, padding=(10, 10, 10, 6))
         top.grid(row=0, column=0, sticky="ew")
         top.grid_columnconfigure(0, weight=1)
         title_row = ttk.Frame(top)
         title_row.grid(row=0, column=0, sticky="w")
-        ttk.Label(title_row, text="Clawmini 工作区会话器", font=("Microsoft YaHei UI", 15, "bold")).pack(side=tk.LEFT)
+        ttk.Label(title_row, text="Clawmini 工作区助手", style="Hero.TLabel").pack(side=tk.LEFT)
         # 设置按钮（打开可视化设置窗口）
         right_tools = ttk.Frame(top)
         right_tools.grid(row=0, column=1, sticky="e")
-        ttk.Button(right_tools, text="帮助", width=5, command=self._show_help).pack(side=tk.RIGHT, padx=(0, 4))
-        ttk.Button(right_tools, text="控制台", command=self._toggle_console_panel).pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(right_tools, text="⚙", width=3, command=self._open_settings_window).pack(side=tk.RIGHT)
-        ttk.Label(top, textvariable=self.help_var, foreground="#666").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(right_tools, text="帮助", width=5, style="Secondary.TButton", command=self._show_help).pack(side=tk.RIGHT, padx=(0, 4))
+        ttk.Button(right_tools, text="控制台", style="Secondary.TButton", command=self._toggle_console_panel).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(right_tools, text="⚙", width=3, style="Primary.TButton", command=self._open_settings_window).pack(side=tk.RIGHT)
+        ttk.Label(top, textvariable=self.help_var, style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         main = ttk.PanedWindow(file_page, orient=tk.HORIZONTAL)
         main.grid(row=1, column=0, sticky="nsew")
@@ -1555,18 +1934,29 @@ class WorkspaceFileApp:
         transcript_panel.grid_columnconfigure(0, weight=1)
         main.add(transcript_panel, weight=3)
 
-        session_box = ttk.LabelFrame(session_panel, text="会话区", padding=8)
+        session_box = ttk.LabelFrame(session_panel, text="会话区", padding=10, style="Card.TLabelframe")
         session_box.grid(row=0, column=0, sticky="nsew")
         session_box.grid_rowconfigure(1, weight=1)
         session_box.grid_columnconfigure(0, weight=1)
 
         button_row = ttk.Frame(session_box)
         button_row.grid(row=0, column=0, sticky="ew")
-        ttk.Button(button_row, text="新建", command=self._new_session).pack(side=tk.LEFT)
-        ttk.Button(button_row, text="删除", command=self._delete_session).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(button_row, text="重命名", command=self._rename_session).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(button_row, text="＋ 新建", style="Primary.TButton", command=self._new_session).pack(side=tk.LEFT)
+        ttk.Button(button_row, text="删除", style="Danger.TButton", command=self._delete_session).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(button_row, text="重命名", style="Secondary.TButton", command=self._rename_session).pack(side=tk.LEFT, padx=(6, 0))
 
-        self.session_list = tk.Listbox(session_box, activestyle="dotbox")
+        self.session_list = tk.Listbox(
+            session_box,
+            activestyle="none",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground="#d8e7e4",
+            selectbackground="#47aeab",
+            selectforeground="#ffffff",
+            background="#ffffff",
+            foreground="#063040",
+            font=("Microsoft YaHei UI", 10),
+        )
         self.session_list.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
         self.session_list.bind("<<ListboxSelect>>", self._on_session_selected)
         self.session_list.bind("<Double-Button-1>", self._on_session_open)
@@ -1574,33 +1964,33 @@ class WorkspaceFileApp:
         self.status_label = ttk.Label(session_box, textvariable=self.status_var, foreground="#555", wraplength=280, justify=tk.LEFT)
         self.status_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
 
-        session_input_box = ttk.LabelFrame(session_panel, text="会话输入", padding=8)
+        session_input_box = ttk.LabelFrame(session_panel, text="会话输入", padding=10, style="Card.TLabelframe")
         session_input_box.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         session_input_box.grid_columnconfigure(0, weight=1)
 
-        self.session_input = ScrolledText(session_input_box, height=5, wrap=tk.WORD, font=("Microsoft YaHei UI", 10))
+        self.session_input = ScrolledText(session_input_box, height=5, wrap=tk.WORD, font=("Microsoft YaHei UI", 10), borderwidth=0, relief="flat", padx=10, pady=8)
         self.session_input.grid(row=0, column=0, sticky="ew")
         self.session_input.bind("<Control-Return>", self._handle_control_enter)
 
         session_input_actions = ttk.Frame(session_input_box)
         session_input_actions.grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Button(session_input_actions, text="发送", command=self._send_session_input).pack(side=tk.LEFT)
-        ttk.Button(session_input_actions, text="清空", command=self._clear_session_input).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(session_input_actions, text="发送 Ctrl+Enter", style="Primary.TButton", command=self._send_session_input).pack(side=tk.LEFT)
+        ttk.Button(session_input_actions, text="清空", style="Secondary.TButton", command=self._clear_session_input).pack(side=tk.LEFT, padx=(6, 0))
 
-        transcript_box = ttk.LabelFrame(transcript_panel, text="当前会话内容", padding=8)
+        transcript_box = ttk.LabelFrame(transcript_panel, text="当前会话内容", padding=10, style="Card.TLabelframe")
         transcript_box.grid(row=0, column=0, sticky="nsew")
         transcript_box.grid_rowconfigure(0, weight=1)
         transcript_box.grid_columnconfigure(0, weight=1)
-        self.transcript = ScrolledText(transcript_box, wrap=tk.WORD, font=("Microsoft YaHei UI", 10))
+        self.transcript = ScrolledText(transcript_box, wrap=tk.WORD, font=("Microsoft YaHei UI", 10), borderwidth=0, relief="flat", padx=12, pady=10)
         self.transcript.grid(row=0, column=0, sticky="nsew")
         self.transcript.configure(state="disabled")
 
-        self.console_box = ttk.LabelFrame(file_page, text="底部控制台", padding=8)
+        self.console_box = ttk.LabelFrame(file_page, text="底部控制台", padding=10, style="Card.TLabelframe")
         self.console_box.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 10))
         self.console_box.grid_remove()
         self.console_box.grid_columnconfigure(0, weight=1)
 
-        self.console_input = ScrolledText(self.console_box, height=5, wrap=tk.WORD, font=("Microsoft YaHei UI", 10))
+        self.console_input = ScrolledText(self.console_box, height=5, wrap=tk.WORD, font=("Microsoft YaHei UI", 10), borderwidth=0, relief="flat", padx=10, pady=8)
         self.console_input.grid(row=0, column=0, columnspan=3, sticky="ew")
 
         ttk.Button(self.console_box, text="发送", command=self._send_console_input).grid(row=1, column=0, sticky="w", pady=(8, 0))
@@ -2116,16 +2506,79 @@ class WorkspaceFileApp:
             self.root.after(200, self._poll_queue)
 
     def _poll_pending_private(self) -> None:
-        """轮询待发送的私聊队列。"""
+        """轮询待发送队列：放到后台线程，避免 DeepSeek/Qwen/NapCat 阻塞 Tkinter 主线程。
+
+        修复点：
+        poll_pending 产生的主动回复不是由 webhook 事件直接返回，
+        所以这里需要读取 result.meta["sent_replies"]，主动写入 Live Ledger。
+        """
         if not hasattr(self, "qq_panel"):
             return
-        try:
-            result = self.qq_panel.tool.run({"command": "poll_pending"})
-            if result.success and "发送=" in result.output:
-                self.qq_status_text.set(f"轮询待回复: {result.output.strip()[:60]}")
-        except Exception:
-            pass
 
+        if getattr(self, "_qq_poll_pending_running", False):
+            return
+
+        self._qq_poll_pending_running = True
+
+        def _worker() -> None:
+            try:
+                result = self.qq_panel.tool.run({"command": "poll_pending"})
+
+                def _apply_result() -> None:
+                    try:
+                        meta = result.meta if isinstance(getattr(result, "meta", None), dict) else {}
+
+                        if result.success and (
+                            "发送=" in result.output
+                            or "群聊合并发送=" in result.output
+                            or "pending轮询完成" in result.output
+                        ):
+                            status_var = getattr(self.qq_panel, "qq_status_text", None)
+                            if status_var is not None:
+                                status_var.set(f"轮询待回复: {result.output.strip()[:80]}")
+
+                        sent_replies = meta.get("sent_replies", [])
+                        if isinstance(sent_replies, list):
+                            for item in sent_replies:
+                                if not isinstance(item, dict):
+                                    continue
+
+                                reply = str(item.get("reply", "") or "").strip()
+                                if not reply:
+                                    continue
+
+                                source = str(item.get("source", item.get("message_type", "group")) or "group")
+                                chat_id = str(item.get("chat_id", "") or "")
+                                kind = str(item.get("kind", "") or "pending")
+
+                                send_token_hint = ""
+                                if hasattr(self.qq_panel, "qq_managed_token_var"):
+                                    raw = self.qq_panel.qq_managed_token_var.get().strip()
+                                    if raw:
+                                        send_token_hint = f" [send:{raw[-4:]}]"
+
+                                label = f"🤖 主动回复 {source}/{chat_id}{send_token_hint}"
+                                self._append_chat_message("system", f"{label}\n{reply}")
+                                self.qq_panel.append_qq_system_message(
+                                    f"主动回复已记录：{kind} | 目标：{source}/{chat_id} | 回复：{reply[:80]}"
+                                )
+
+                    finally:
+                        self._qq_poll_pending_running = False
+
+                self.root.after(0, _apply_result)
+
+            except Exception as exc:
+                def _apply_error() -> None:
+                    try:
+                        if hasattr(self, "qq_panel"):
+                            self.qq_panel.append_qq_system_message(f"轮询待回复异常：{exc}")
+                    finally:
+                        self._qq_poll_pending_running = False
+
+                self.root.after(0, _apply_error)
+
+        threading.Thread(target=_worker, daemon=True).start()
     def _handle_qq_gateway_event(self, payload: dict[str, Any]) -> None:
         """处理单个 QQ 网关事件（在后台线程中执行工具调用）。"""
         raw_event = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload

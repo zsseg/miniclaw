@@ -1,165 +1,207 @@
-"""UI 主题与样式辅助。
+"""紧凑 LoveLedger 风格主题。"""
 
-提供 `apply_theme(root)` 在应用启动时统一设置 ttk 样式和默认字体/配色。
-"""
 from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
 
 
-def apply_theme(root: tk.Tk) -> None:
-    """为传入的 Tk 根窗口应用统一主题样式。
+PALETTE = {
+    "paper": "#f3eee3",
+    "paper_2": "#eee6d8",
+    "card": "#fff8e8",
+    "ink": "#26211f",
+    "muted": "#7b7167",
+    "green": "#285d52",
+    "green_light": "#d9e7de",
+    "red": "#b85757",
+    "gold": "#d49b54",
+    "border": "#27211d",
+}
 
-    采用可用的 ttk 主题（优先 'clam'），设置全局字体、配色与常见控件样式。
-    该实现尽量保持兼容性，若运行平台/主题不完全支持某些属性会安静失败。
-    """
+FONT_UI = ("Microsoft YaHei UI", 10)
+FONT_UI_BOLD = ("Microsoft YaHei UI", 10, "bold")
+FONT_TITLE = ("Georgia", 18, "bold")
+FONT_SUBTITLE = ("Georgia", 10, "italic")
+FONT_MONO = ("Consolas", 10)
+
+
+def _safe_configure(style: ttk.Style, name: str, **kwargs) -> None:
+    try:
+        style.configure(name, **kwargs)
+    except Exception:
+        pass
+
+
+def _safe_map(style: ttk.Style, name: str, **kwargs) -> None:
+    try:
+        style.map(name, **kwargs)
+    except Exception:
+        pass
+
+
+def apply_theme(root: tk.Tk) -> None:
     style = ttk.Style(root)
     try:
-        themes = style.theme_names()
-        if "clam" in themes:
+        if "clam" in style.theme_names():
             style.theme_use("clam")
-        else:
-            style.theme_use(themes[0])
     except Exception:
-        # 主题选择不是关键，继续使用当前主题
         pass
 
-    # 青蓝风格配色（简洁、柔和）
-    # 青蓝风格配色（降低对比度，避免刺眼）
-    palette = {
-        "bg": "#eaf5f3",
-        "surface": "#ffffff",
-        "primary": "#47aeab",
-        "primary_dark": "#3a9b98",
-        "muted": "#7a8a8e",
-        "text": "#063040",
-        "muted_bg": "#d4edeb",
-    }
-
-    default_font = ("Microsoft YaHei UI", 11)
-
-    # 全局默认字体与根背景
     try:
-        root.option_add("*Font", default_font)
-        root.configure(background=palette["bg"])
+        root.option_add("*Font", FONT_UI)
+        root.configure(background=PALETTE["paper"])
     except Exception:
         pass
 
-    # 基本 ttk 控件样式（保持简洁、留白充足）
-    style.configure(".", background=palette["bg"], foreground=palette["text"], font=default_font)
-    style.configure("TFrame", background=palette["bg"])
-    style.configure("Card.TFrame", background=palette["surface"], relief="flat", borderwidth=0)
-    style.configure("TLabel", background=palette["bg"], foreground=palette["text"])
-    style.configure(
-        "Header.TLabel",
-        background=palette["bg"],
-        foreground=palette["text"],
-        font=(default_font[0], 13, "bold"),
-    )
+    _safe_configure(style, ".", background=PALETTE["paper"], foreground=PALETTE["ink"], font=FONT_UI)
+    _safe_configure(style, "TFrame", background=PALETTE["paper"])
+    _safe_configure(style, "Paper.TFrame", background=PALETTE["paper"])
+    _safe_configure(style, "Surface.TFrame", background=PALETTE["card"])
 
-    # 按钮：扁平+主色强调
-    style.configure(
-        "TButton",
-        padding=8,
+    _safe_configure(style, "TLabel", background=PALETTE["paper"], foreground=PALETTE["ink"], font=FONT_UI)
+    _safe_configure(style, "Title.TLabel", background=PALETTE["paper"], foreground=PALETTE["ink"], font=FONT_TITLE)
+    _safe_configure(style, "Subtitle.TLabel", background=PALETTE["paper"], foreground=PALETTE["muted"], font=FONT_SUBTITLE)
+    _safe_configure(style, "Muted.TLabel", background=PALETTE["card"], foreground=PALETTE["muted"], font=("Microsoft YaHei UI", 9))
+
+    _safe_configure(style, "TLabelframe", background=PALETTE["card"], foreground=PALETTE["ink"], relief="solid", borderwidth=1, padding=8)
+    _safe_configure(style, "TLabelframe.Label", background=PALETTE["paper"], foreground=PALETTE["ink"], font=("Georgia", 11, "bold"))
+    _safe_configure(style, "Card.TLabelframe", background=PALETTE["card"], foreground=PALETTE["ink"], relief="solid", borderwidth=1, padding=8)
+    _safe_configure(style, "Card.TLabelframe.Label", background=PALETTE["card"], foreground=PALETTE["ink"], font=("Georgia", 11, "bold"))
+
+    _safe_configure(style, "TButton", padding=(10, 6), relief="solid", borderwidth=1, background=PALETTE["card"], foreground=PALETTE["ink"], font=FONT_UI_BOLD)
+    _safe_map(style, "TButton", background=[("active", PALETTE["paper_2"]), ("pressed", "#e6d8c7")])
+    _safe_configure(style, "Primary.TButton", padding=(11, 7), relief="solid", borderwidth=1, background=PALETTE["ink"], foreground=PALETTE["card"], font=FONT_UI_BOLD)
+    _safe_map(style, "Primary.TButton", background=[("active", "#3a3430"), ("pressed", "#11100f")])
+    _safe_configure(style, "Secondary.TButton", padding=(10, 6), relief="solid", borderwidth=1, background=PALETTE["card"], foreground=PALETTE["ink"], font=FONT_UI_BOLD)
+    _safe_configure(style, "Success.TButton", background=PALETTE["green"], foreground=PALETTE["card"], padding=(10, 6), relief="solid")
+    _safe_configure(style, "Warning.TButton", background=PALETTE["gold"], foreground=PALETTE["ink"], padding=(10, 6), relief="solid")
+    _safe_configure(style, "Danger.TButton", background=PALETTE["red"], foreground=PALETTE["card"], padding=(10, 6), relief="solid")
+
+    for stylename in ("TEntry", "TSpinbox"):
+        _safe_configure(style, stylename, fieldbackground=PALETTE["card"], background=PALETTE["card"], foreground=PALETTE["ink"], insertcolor=PALETTE["ink"], padding=4, relief="solid", borderwidth=1)
+
+    _safe_configure(style, "TCombobox", fieldbackground=PALETTE["card"], background=PALETTE["card"], foreground=PALETTE["ink"], arrowcolor=PALETTE["ink"], padding=4, relief="solid", borderwidth=1)
+
+
+    _safe_configure(
+        style,
+        "TopPrimary.TButton",
+        padding=(14, 8),
         relief="flat",
-        background=palette["primary"],
-        foreground="white",
         borderwidth=0,
+        background=PALETTE["green"],
+        foreground=PALETTE["card"],
+        font=("Microsoft YaHei UI", 10, "bold"),
     )
-    style.map(
-        "TButton",
-        background=[("pressed", palette["primary_dark"]), ("active", palette["primary_dark"]), ("disabled", "#c0d6d4")],
-        foreground=[("disabled", "#aec0c2")],
-    )
-
-    # 提供一个显式的主按钮样式，方便未来局部使用
-    style.configure("Primary.TButton", foreground="white", background=palette["primary"], padding=8)
-
-    style.configure(
-        "TEntry",
-        fieldbackground=palette["surface"],
-        background=palette["surface"],
-        foreground=palette["text"],
-    )
-    style.configure(
-        "TCombobox",
-        fieldbackground=palette["surface"],
-        background=palette["surface"],
-        foreground=palette["text"],
+    _safe_map(
+        style,
+        "TopPrimary.TButton",
+        background=[("active", "#214e45"), ("pressed", "#183a34")],
+        foreground=[("active", PALETTE["card"])],
     )
 
-    # Notebook（选项卡）风格：默认柔和背景，选中时为白卡片
-    style.configure("TNotebook", background=palette["bg"], borderwidth=0)
-    style.configure(
-        "TNotebook.Tab",
-        padding=[12, 8],
-        background=palette["muted_bg"],
-        foreground=palette["text"],
-        font=(default_font[0], 10),
+    _safe_configure(
+        style,
+        "TopSecondary.TButton",
+        padding=(14, 8),
+        relief="flat",
+        borderwidth=0,
+        background=PALETTE["card"],
+        foreground=PALETTE["ink"],
+        font=("Microsoft YaHei UI", 10, "bold"),
     )
-    style.map("TNotebook.Tab", background=[("selected", palette["surface"])])
+    _safe_map(
+        style,
+        "TopSecondary.TButton",
+        background=[("active", PALETTE["paper_2"]), ("pressed", "#e6d8c7")],
+        foreground=[("active", PALETTE["ink"])],
+    )
 
-    # LabelFrame / Card 风格，适合作为信息卡片
-    style.configure("Card.TLabelframe", background=palette["surface"], foreground=palette["text"])
-    style.configure("Card.TLabelframe.Label", background=palette["surface"], foreground=palette["text"]) 
+    _safe_configure(
+        style,
+        "TopGhost.TButton",
+        padding=(14, 8),
+        relief="flat",
+        borderwidth=0,
+        background=PALETTE["paper_2"],
+        foreground=PALETTE["ink"],
+        font=("Microsoft YaHei UI", 10, "bold"),
+    )
+    _safe_map(
+        style,
+        "TopGhost.TButton",
+        background=[("active", "#e4d7c7"), ("pressed", "#d9c9b5")],
+        foreground=[("active", PALETTE["ink"])],
+    )
 
-    # 文本类 Widget 的默认设置（编辑区、控制台）
+    _safe_configure(
+        style,
+        "Mini.TButton",
+        padding=(8, 4),
+        relief="solid",
+        borderwidth=1,
+        background=PALETTE["ink"],
+        foreground=PALETTE["card"],
+        font=("Microsoft YaHei UI", 8, "bold"),
+    )
+    _safe_map(
+        style,
+        "Mini.TButton",
+        background=[("active", "#3a3430"), ("pressed", "#11100f")],
+        foreground=[("active", PALETTE["card"])],
+    )
+
+    _safe_configure(style, "TNotebook", background=PALETTE["paper"], borderwidth=0, tabmargins=(2, 2, 2, 0))
+    _safe_configure(style, "TNotebook.Tab", padding=(18, 10), background=PALETTE["green"], foreground=PALETTE["card"], borderwidth=1, font=("Georgia", 11, "bold"))
+    _safe_map(style, "TNotebook.Tab", background=[("selected", PALETTE["card"]), ("active", PALETTE["paper_2"])], foreground=[("selected", PALETTE["green"]), ("active", PALETTE["ink"])])
+
+    _safe_configure(style, "Ledger.TNotebook", background=PALETTE["card"], borderwidth=0, tabmargins=(0, 0, 0, 0))
+    _safe_configure(style, "Ledger.TNotebook.Tab", padding=(14, 7), background=PALETTE["paper_2"], foreground=PALETTE["ink"], borderwidth=1, font=("Georgia", 10, "bold"))
+    _safe_map(style, "Ledger.TNotebook.Tab", background=[("selected", PALETTE["card"]), ("active", "#eadfcc")], foreground=[("selected", PALETTE["green"])])
+
+    _safe_configure(style, "Vertical.TScrollbar", background=PALETTE["paper_2"], troughcolor=PALETTE["card"], arrowcolor=PALETTE["ink"])
+    _safe_configure(style, "Horizontal.TScrollbar", background=PALETTE["paper_2"], troughcolor=PALETTE["card"], arrowcolor=PALETTE["ink"])
+    _safe_configure(style, "TCheckbutton", background=PALETTE["card"], foreground=PALETTE["ink"], font=FONT_UI)
+
     try:
-        root.option_add("*Text.Background", palette["surface"])
-        root.option_add("*Text.Foreground", palette["text"])
-        root.option_add("*Text.Font", ("Consolas", 11))
-        root.option_add("*Entry.Background", palette["surface"])
+        root.option_add("*Text.Background", PALETTE["card"])
+        root.option_add("*Text.Foreground", PALETTE["ink"])
+        root.option_add("*Text.InsertBackground", PALETTE["ink"])
+        root.option_add("*Text.SelectBackground", PALETTE["green_light"])
+        root.option_add("*Text.SelectForeground", PALETTE["ink"])
+        root.option_add("*Text.Font", FONT_MONO)
     except Exception:
         pass
 
-    # 小调整，尽量减少控件边框视觉噪音
+
+def style_text_widget(widget: tk.Text | tk.Widget) -> None:
     try:
-        style.configure("Toolbutton", relief="flat")
+        widget.configure(
+            background=PALETTE["card"],
+            foreground=PALETTE["ink"],
+            insertbackground=PALETTE["ink"],
+            selectbackground=PALETTE["green_light"],
+            selectforeground=PALETTE["ink"],
+            relief=tk.SOLID,
+            borderwidth=1,
+            highlightthickness=1,
+            highlightbackground=PALETTE["border"],
+            highlightcolor=PALETTE["green"],
+            font=FONT_MONO,
+            padx=10,
+            pady=8,
+        )
     except Exception:
         pass
 
-    # 额外美化：次级、轮廓按钮与输入框聚焦样式
+
+def style_canvas(canvas: tk.Canvas) -> None:
     try:
-        style.configure(
-            "Secondary.TButton",
-            padding=8,
-            relief="flat",
-            background=palette["muted_bg"],
-            foreground=palette["text"],
+        canvas.configure(
+            background=PALETTE.get("paper", "#f3eee3"),
+            highlightthickness=0,
             borderwidth=0,
         )
-        style.map(
-            "Secondary.TButton",
-            background=[("active", palette["surface"])],
-            foreground=[("disabled", "#aec0c2")],
-        )
-
-        style.configure(
-            "Outline.TButton",
-            padding=6,
-            relief="flat",
-            background=palette["bg"],
-            foreground=palette["primary"],
-            borderwidth=1,
-        )
-        style.map(
-            "Outline.TButton",
-            background=[("active", palette["muted_bg"])],
-            foreground=[("active", palette["primary_dark"])],
-        )
-
-        # 输入框 focus 高亮（在支持的主题下生效）
-        style.map("TEntry", fieldbackground=[("focus", palette["surface"])])
-        style.map("TEntry", foreground=[("disabled", "#aec0c2")])
-
-        # 下拉在焦点时使用白色卡片背景以突出
-        style.map("TCombobox", fieldbackground=[("focus", palette["surface"])])
-    except Exception:
-        pass
-
-    # 尝试使用 ttk 内置圆角样式（部分主题支持 'rounded' 子样式）
-    try:
-        style.configure("TRadiobutton", relief="flat")
     except Exception:
         pass
