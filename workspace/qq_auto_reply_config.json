@@ -16,7 +16,7 @@
   "cooldown_sec": 0,
   "self_user_id": "391143621",
   "reply_api_provider": "deepseek",
-  "reply_api_model": "deepseek-v4-pro",
+  "reply_api_model": "deepseek-v4-flash",
   "reply_api_key": "sk-a9caee71817d473c9f4f18926c9da53b",
   "reply_api_base_url": "https://api.deepseek.com",
   "managed_account": "391143621",
@@ -34,7 +34,7 @@
     "executable_path": "",
     "window_title": "",
     "connected": true,
-    "bound_at": "2026-05-02T18:27:22",
+    "bound_at": "2026-05-03T16:40:15",
     "notes": "托管账号模式已启用，不依赖本地 QQ 窗口。"
   }
 }

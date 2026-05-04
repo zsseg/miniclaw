@@ -1,6 +1,6 @@
 {
   "text_api_provider": "deepseek",
-  "text_api_model": "deepseek-v4-pro",
+  "text_api_model": "deepseek-v4-flash",
   "text_api_key": "sk-a9caee71817d473c9f4f18926c9da53b",
   "text_api_base_url": "https://api.deepseek.com",
   "enable_search": true,
